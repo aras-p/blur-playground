@@ -1,3 +1,7 @@
+### Build
+
+Place sokol-shdc under `tools/` folder.
+
 ### External libraries
 
 - Sokol: 2025 Dec (f38e0b5)
