@@ -8,10 +8,12 @@
 #include "../lib/sokol/sokol_log.h"
 #include "../lib/sokol/util/sokol_imgui.h"
 #include "../lib/tinyexr/tinyexr.h"
+#include "../lib/stb/stb_image.h"
 
 #include "../shaders/display_tex.glsl.h"
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -37,7 +39,7 @@ static struct
         int blur_x = 20.0f;
         int blur_y = 20.0f;
         bool lock_xy = true;
-        std::vector<std::string> exr_files;
+        std::vector<std::string> image_files;
         int selected_file_index = -1;
         std::string dragged_file_name;
     } ui;
@@ -45,8 +47,8 @@ static struct
 
 static void ui_draw();
 static void apply_viewport();
-static void load_exr_file(const char *filepath);
-static void scan_exr_files();
+static void load_image_file(const char *filepath);
+static void scan_image_files();
 
 static void init()
 {
@@ -103,25 +105,32 @@ static void init()
         state.smp.nearest = sg_make_sampler(&desc);
     }
 
-    scan_exr_files();
-    if (!state.ui.exr_files.empty())
+    scan_image_files();
+    if (!state.ui.image_files.empty())
     {
         state.ui.selected_file_index = 0;
-        load_exr_file(state.ui.exr_files[0].c_str());
+        load_image_file(state.ui.image_files[0].c_str());
     }
 }
 
-static void scan_exr_files()
+static bool is_image_file(const std::filesystem::path &path)
 {
-    state.ui.exr_files.clear();
+    std::string ext = path.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+    return ext == ".exr" || ext == ".png" || ext == ".jpg" || ext == ".jpeg";
+}
 
-    auto scan_directory = [](const std::filesystem::path &dir)
+static void scan_image_files()
+{
+    state.ui.image_files.clear();
+
+    auto scan_directory = [&](const std::filesystem::path &dir)
     {
         for (const auto &entry : std::filesystem::directory_iterator(dir))
         {
-            if (entry.is_regular_file() && entry.path().extension() == ".exr")
+            if (entry.is_regular_file() && is_image_file(entry.path()))
             {
-                state.ui.exr_files.push_back(entry.path().string());
+                state.ui.image_files.push_back(entry.path().string());
             }
         }
     };
@@ -143,7 +152,7 @@ static void scan_exr_files()
         // ignore errors
     }
 
-    std::sort(state.ui.exr_files.begin(), state.ui.exr_files.end());
+    std::sort(state.ui.image_files.begin(), state.ui.image_files.end());
 }
 
 static void frame()
@@ -200,23 +209,36 @@ static const char *get_filename_part(const char *path)
     return path;
 }
 
-static void load_exr_file(const char *filepath)
+static void load_image_file(const char *filepath)
 {
     float *img = nullptr;
-    int width;
-    int height;
-    const char *err = nullptr;
-    int ret = LoadEXR(&img, &width, &height, filepath, &err);
-    if (ret != TINYEXR_SUCCESS)
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    
+    // first try stb_image
+    float *data = stbi_loadf(filepath, &width, &height, &channels, 4);
+    if (data)
     {
-        printf("FAILED to read input exr: %s: %s\n", filepath, err);
-        FreeEXRErrorMessage(err);
-        return;
+        delete state.tex_source;
+        state.tex_source = new Texture(width, height, 4, data, "source-image");
+        stbi_image_free(data);
     }
-
-    delete state.tex_source;
-    state.tex_source = new Texture(width, height, 4, img, "source-image");
-    free(img);
+    else
+    {
+        // then try tinyexr
+        const char *err = nullptr;
+        int ret = LoadEXR(&img, &width, &height, filepath, &err);
+        if (ret != TINYEXR_SUCCESS)
+        {
+            printf("FAILED to read input: %s: %s\n", filepath, err);
+            FreeEXRErrorMessage(err);
+            return;
+        }
+        delete state.tex_source;
+        state.tex_source = new Texture(width, height, 4, img, "source-image");
+        free(img);
+    }
 
     delete state.tex_blurred;
     state.tex_blurred = new Texture(width, height, "blurred-image");
@@ -230,7 +252,7 @@ static void input(const sapp_event *ev)
     if (ev->type == SAPP_EVENTTYPE_FILES_DROPPED)
     {
         const char *path = sapp_get_dropped_file_path(0);
-        load_exr_file(path);
+        load_image_file(path);
         state.ui.dragged_file_name = get_filename_part(path);
         state.ui.selected_file_index = -1;
     }
@@ -253,20 +275,20 @@ static void ui_draw()
         {
             ImGui::Text("Dropped: %s", state.ui.dragged_file_name.c_str());
         }
-        if (!state.ui.exr_files.empty())
+        if (!state.ui.image_files.empty())
         {
             ImGui::Text("Files:");
-            if (ImGui::BeginListBox("##exr_files", ImVec2(-FLT_MIN, 5.25f * ImGui::GetTextLineHeightWithSpacing())))
+            if (ImGui::BeginListBox("##image_files", ImVec2(-FLT_MIN, 5.25f * ImGui::GetTextLineHeightWithSpacing())))
             {
-                for (int i = 0; i < (int)state.ui.exr_files.size(); i++)
+                for (int i = 0; i < (int)state.ui.image_files.size(); i++)
                 {
-                    const char *filename = get_filename_part(state.ui.exr_files[i].c_str());
+                    const char *filename = get_filename_part(state.ui.image_files[i].c_str());
                     bool is_selected = (state.ui.selected_file_index == i);
                     if (ImGui::Selectable(filename, is_selected))
                     {
                         state.ui.selected_file_index = i;
                         state.ui.dragged_file_name.clear();
-                        load_exr_file(state.ui.exr_files[i].c_str());
+                        load_image_file(state.ui.image_files[i].c_str());
                     }
                     if (is_selected)
                         ImGui::SetItemDefaultFocus();

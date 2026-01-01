@@ -27,6 +27,7 @@ add_executable (blur_playground
     src/blurs.h
     src/lib_impl.cpp
     src/texture.h
+    readme.md
     shaders/blur.glsl
     shaders/display_tex.glsl
     lib/imgui/imgui.cpp
