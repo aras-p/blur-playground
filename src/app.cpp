@@ -22,19 +22,81 @@
 #include <string>
 #include <vector>
 
+enum BlurMode
+{
+    BLUR_GAUSSIAN = 0,
+    BLUR_DUAL_KAWASE = 1,
+};
+
+static sg_pixel_format pixel_format_from_channels(int channels)
+{
+    switch (channels)
+    {
+    case 1:
+        return SG_PIXELFORMAT_R32F;
+    case 2:
+        return SG_PIXELFORMAT_RG32F;
+    case 4:
+        return SG_PIXELFORMAT_RGBA32F;
+    default:
+        return SG_PIXELFORMAT_NONE;
+    }
+}
+
+struct Texture
+{
+    // texture for sampling
+    Texture(int width, int height, int channels, const float *data, const char *dbg_name) : width(width), height(height)
+    {
+        this->image = sg_make_image(sg_image_desc{
+            .width = width,
+            .height = height,
+            .pixel_format = pixel_format_from_channels(channels),
+            .label = dbg_name,
+            .num_mipmaps = 1,
+            .data.mip_levels[0] = { .ptr = data, .size = sizeof(float) * channels * width * height },
+        });
+        this->view_sample = sg_make_view(sg_view_desc{ .texture.image = this->image });
+    }
+    // render target attachment
+    Texture(int width, int height, const char *dbg_name) : width(width), height(height)
+    {
+        this->image = sg_make_image(sg_image_desc{
+            .width = width,
+            .height = height,
+            .pixel_format = pixel_format_from_channels(4),
+            .label = dbg_name,
+            .num_mipmaps = 1,
+            .sample_count = 1,
+            .usage.color_attachment = true,
+        });
+        this->view_sample = sg_make_view(sg_view_desc{ .texture.image = this->image });
+        this->view_attachment = sg_make_view(sg_view_desc{ .color_attachment.image = this->image });
+    }
+
+    ~Texture()
+    {
+        sg_destroy_view(view_sample);
+        sg_destroy_view(view_attachment);
+        sg_destroy_image(image);
+    }
+    int width = 0;
+    int height = 0;
+    sg_image image = {};
+    sg_view view_sample = {};
+    sg_view view_attachment = {};
+};
+
 static struct
 {
     sg_pass_action pass_action;
-    sg_image img_src;
-    sg_image img_blurred;
-    sg_image img_blur_tmp;
-    sg_view view_tex_src;
-    sg_view view_tex_blur_tmp;
-    sg_view view_tex_blurred;
-    sg_view view_rt_blurred;
-    sg_view view_rt_blur_tmp;
+    sg_pass_action pass_action_dontcare;
+    Texture *tex_source = nullptr;
+    Texture *tex_blurred_tmp = nullptr;
+    Texture *tex_blurred = nullptr;
     sg_pipeline pip;
     sg_pipeline pip_gaussian;
+    sg_pipeline pip_dk_down, pip_dk_up, pip_dk_mix;
     struct
     {
         sg_sampler linear;
@@ -48,6 +110,7 @@ static struct
     } img_info;
     struct
     {
+        int blur_mode = BLUR_GAUSSIAN;
         bool show_original = false;
         int blur_x = 20.0f;
         int blur_y = 20.0f;
@@ -77,16 +140,7 @@ static void init()
     state.pass_action = {
         .colors[0] = { .load_action = SG_LOADACTION_CLEAR, .clear_value = { 0.0f, 0.0f, 0.0f, 1.0f } },
     };
-
-    // pre-allocate handles so we can keep rendering even no image has been loaded yet
-    state.img_src = sg_alloc_image();
-    state.img_blurred = sg_alloc_image();
-    state.img_blur_tmp = sg_alloc_image();
-    state.view_tex_src = sg_alloc_view();
-    state.view_tex_blur_tmp = sg_alloc_view();
-    state.view_tex_blurred = sg_alloc_view();
-    state.view_rt_blurred = sg_alloc_view();
-    state.view_rt_blur_tmp = sg_alloc_view();
+    state.pass_action_dontcare = { .colors[0] = { .load_action = SG_LOADACTION_DONTCARE } };
 
     // a render pipeline
     {
@@ -121,16 +175,34 @@ static void init()
     }
 
     // pipelines for blurring
-    {
-        sg_pipeline_desc desc = {
-            .shader = sg_make_shader(blur_gaussian_shader_desc(sg_query_backend())),
-            .colors[0].pixel_format = SG_PIXELFORMAT_RGBA32F,
-            .depth.pixel_format = SG_PIXELFORMAT_NONE,
-            .primitive_type = SG_PRIMITIVETYPE_TRIANGLE_STRIP,
-            .label = "pipe-blur-gaussian",
-        };
-        state.pip_gaussian = sg_make_pipeline(&desc);
-    }
+    state.pip_gaussian = sg_make_pipeline(sg_pipeline_desc{
+        .shader = sg_make_shader(blur_gaussian_shader_desc(sg_query_backend())),
+        .colors[0].pixel_format = SG_PIXELFORMAT_RGBA32F,
+        .depth.pixel_format = SG_PIXELFORMAT_NONE,
+        .primitive_type = SG_PRIMITIVETYPE_TRIANGLE_STRIP,
+        .label = "pipe-blur-gaussian",
+    });
+    state.pip_dk_down = sg_make_pipeline(sg_pipeline_desc{
+        .shader = sg_make_shader(blur_dk_down_shader_desc(sg_query_backend())),
+        .colors[0].pixel_format = SG_PIXELFORMAT_RGBA32F,
+        .depth.pixel_format = SG_PIXELFORMAT_NONE,
+        .primitive_type = SG_PRIMITIVETYPE_TRIANGLE_STRIP,
+        .label = "pipe-dk-down",
+    });
+    state.pip_dk_up = sg_make_pipeline(sg_pipeline_desc{
+        .shader = sg_make_shader(blur_dk_up_shader_desc(sg_query_backend())),
+        .colors[0].pixel_format = SG_PIXELFORMAT_RGBA32F,
+        .depth.pixel_format = SG_PIXELFORMAT_NONE,
+        .primitive_type = SG_PRIMITIVETYPE_TRIANGLE_STRIP,
+        .label = "pipe-dk-down",
+    });
+    state.pip_dk_mix = sg_make_pipeline(sg_pipeline_desc{
+        .shader = sg_make_shader(blur_dk_mix_shader_desc(sg_query_backend())),
+        .colors[0].pixel_format = SG_PIXELFORMAT_RGBA32F,
+        .depth.pixel_format = SG_PIXELFORMAT_NONE,
+        .primitive_type = SG_PRIMITIVETYPE_TRIANGLE_STRIP,
+        .label = "pipe-dk-down",
+    });
 
     load_exr_file("exr/test.exr");
 }
@@ -146,25 +218,29 @@ static void frame()
     simgui_new_frame(&frame_desc);
     ui_draw();
 
-    // const fs_params_t fs_params = { .mip_lod = state.ui.mip_lod };
     sg_pass pass = { .action = state.pass_action, .swapchain = sglue_swapchain() };
     sg_begin_pass(&pass);
-    apply_viewport();
-    sg_apply_pipeline(state.pip);
 
+    apply_viewport();
+    if (state.tex_source)
     {
-        sg_bindings bind = {
-            .views[VIEW_tex] = state.ui.show_original ? state.view_tex_src : state.view_tex_blurred,
-            .samplers[SMP_smp] = state.smp.nearest,
-        };
-        sg_apply_bindings(&bind);
+        sg_apply_pipeline(state.pip);
+        {
+            sg_bindings bind = {
+                .views[VIEW_tex] =
+                    state.ui.show_original ? state.tex_source->view_sample : state.tex_blurred->view_sample,
+                .samplers[SMP_smp] = state.smp.nearest,
+            };
+            sg_apply_bindings(&bind);
+        }
+        sg_draw(0, 4, 1);
     }
-    // sg_apply_uniforms(UB_fs_params, &SG_RANGE(fs_params));
-    sg_draw(0, 4, 1);
     simgui_render();
     sg_end_pass();
     sg_commit();
 }
+
+// ======== Gaussian blur
 
 static float gauss_kernel_value(float x)
 {
@@ -175,7 +251,7 @@ static float gauss_kernel_value(float x)
     return 1.0f / sqrtf(float(M_PI) * two_scale2) * expf(-x * x / two_scale2);
 }
 
-static sg_image calc_gaussian_weights(float radius, int &r_size)
+static Texture *calc_gaussian_weights(float radius)
 {
     // Kernel size is radius+1, but since it is symmetric we only store
     // one half.
@@ -204,28 +280,18 @@ static sg_image calc_gaussian_weights(float radius, int &r_size)
     {
         result[i] /= sum;
     }
-    r_size = size;
 
-    // Create texture
-    sg_image_desc img_desc = { .width = size,
-        .height = 1,
-        .pixel_format = SG_PIXELFORMAT_R32F,
-        .label = "gaussian-kernel",
-        .num_mipmaps = 1,
-        .data.mip_levels[0] = { .ptr = result.data(), .size = sizeof(float) * size } };
-    return sg_make_image(&img_desc);
+    return new Texture(size, 1, 1, result.data(), "gaussian-kernel");
 }
 
 static void gaussian_pass(bool horizontal, float radius)
 {
-    int weights_size;
-    sg_image img_weights = calc_gaussian_weights(radius, weights_size);
-    sg_view view_weights = sg_make_view(sg_view_desc{ .texture.image = img_weights });
+    Texture *weights = calc_gaussian_weights(radius);
 
     const fs_gaussian_params_t par = {
         .uv_step[0] = horizontal ? 1.0f / state.img_info.width : 0.0f,
         .uv_step[1] = horizontal ? 0.0f : 1.0f / state.img_info.height,
-        .kernel_width = weights_size,
+        .kernel_width = weights->width,
     };
     sg_pass pass = {
         .action = {
@@ -234,7 +300,7 @@ static void gaussian_pass(bool horizontal, float radius)
             },
         },
         .attachments = {
-            .colors[0] = horizontal ? state.view_rt_blur_tmp : state.view_rt_blurred,
+            .colors[0] = horizontal ? state.tex_blurred_tmp->view_attachment : state.tex_blurred->view_attachment,
         },
     };
     sg_begin_pass(&pass);
@@ -242,8 +308,8 @@ static void gaussian_pass(bool horizontal, float radius)
 
     {
         sg_bindings bind = {
-            .views[VIEW_tex] = horizontal ? state.view_tex_src : state.view_tex_blur_tmp,
-            .views[VIEW_tex_kernel] = view_weights,
+            .views[VIEW_tex] = horizontal ? state.tex_source->view_sample : state.tex_blurred_tmp->view_sample,
+            .views[VIEW_tex_kernel] = weights->view_sample,
             .samplers[SMP_smp] = state.smp.nearest,
         };
         sg_apply_bindings(&bind);
@@ -252,8 +318,7 @@ static void gaussian_pass(bool horizontal, float radius)
     sg_draw(0, 4, 1);
     sg_end_pass();
 
-    sg_destroy_image(img_weights);
-    sg_destroy_view(view_weights);
+    delete weights;
 }
 
 static void blur_gaussian()
@@ -262,7 +327,156 @@ static void blur_gaussian()
     gaussian_pass(false, state.ui.blur_y);
 }
 
-static void update_blur() { blur_gaussian(); }
+// ======== Dual Kawase blur
+
+static Texture *kawase_downsample(const Texture &input, int full_size_x, int full_size_y, int divisor, float ratio)
+{
+    int size_x = std::max(full_size_x / divisor, 1);
+    int size_y = std::max(full_size_y / divisor, 1);
+    Texture *output = new Texture(size_x, size_y, "kawase_down");
+    // Note: "step" is based on *output* size, which is 2x smaller than input
+    float step_x = ratio / size_x;
+    float step_y = ratio / size_y;
+
+    const fs_dk_down_params_t par = {
+        .uv_step[0] = step_x,
+        .uv_step[1] = step_y,
+    };
+    sg_begin_pass(sg_pass{ .action = state.pass_action_dontcare,
+        .attachments = {
+            .colors[0] = output->view_attachment,
+        } });
+    sg_apply_pipeline(state.pip_dk_down);
+    sg_apply_bindings(sg_bindings{
+        .views[VIEW_tex] = input.view_sample,
+        .samplers[SMP_smp] = state.smp.linear,
+    });
+    sg_apply_uniforms(UB_fs_dk_down_params, SG_RANGE(par));
+    sg_draw(0, 4, 1);
+    sg_end_pass();
+    return output;
+}
+
+static Texture *kawase_upsample(
+    const Texture &input, int full_size_x, int full_size_y, int divisor, float ratio, Texture *output)
+{
+    int size_x = std::max(full_size_x / divisor, 1);
+    int size_y = std::max(full_size_y / divisor, 1);
+    if (output == nullptr)
+        output = new Texture(size_x, size_y, "kawase_up");
+    // Note: "step" is based on *input* size, which is 2x smaller than output
+    float step_x = ratio / input.width;
+    float step_y = ratio / input.height;
+
+    const fs_dk_up_params_t par = {
+        .uv_step[0] = step_x,
+        .uv_step[1] = step_y,
+    };
+    sg_begin_pass(sg_pass{ .action = state.pass_action_dontcare,
+        .attachments = {
+            .colors[0] = output->view_attachment,
+        } });
+    sg_apply_pipeline(state.pip_dk_up);
+    sg_apply_bindings(sg_bindings{
+        .views[VIEW_tex] = input.view_sample,
+        .samplers[SMP_smp] = state.smp.linear,
+    });
+    sg_apply_uniforms(UB_fs_dk_up_params, SG_RANGE(par));
+    sg_draw(0, 4, 1);
+    sg_end_pass();
+    return output;
+}
+
+static Texture *kawase_mix(const Texture &input1, const Texture &input2, float ratio)
+{
+    Texture *output = new Texture(input1.width, input1.height, "kawase_mix");
+    const fs_dk_mix_params_t par = {
+        .ratio = ratio,
+    };
+    sg_begin_pass(sg_pass{ .action = state.pass_action_dontcare,
+        .attachments = {
+            .colors[0] = output->view_attachment,
+        } });
+    sg_apply_pipeline(state.pip_dk_mix);
+    sg_apply_bindings(sg_bindings{
+        .views[VIEW_tex] = input1.view_sample,
+        .views[VIEW_tex2] = input2.view_sample,
+        .samplers[SMP_smp] = state.smp.nearest,
+    });
+    sg_apply_uniforms(UB_fs_dk_mix_params, SG_RANGE(par));
+    sg_draw(0, 4, 1);
+    sg_end_pass();
+    return output;
+}
+
+static void blur_dual_kawase()
+{
+    // Dual Kawase is isotropic, so blur based on max(x,y)
+    float radius = std::max(state.ui.blur_x, state.ui.blur_y);
+
+    // Amount of Kawase "steps" to do; this more or less matches the blur
+    // amount of Gaussian.
+    float num_steps = radius / 3.0f;
+
+    const int full_size_x = state.img_info.width;
+    const int full_size_y = state.img_info.height;
+
+    Texture *curr = state.tex_source;
+
+    // Downsample
+    int last_pass = 1;
+    for (int i = 2; i <= num_steps; i *= 2)
+    {
+        Texture *tmp = kawase_downsample(*curr, full_size_x, full_size_y, i, 1.0f);
+        if (curr != state.tex_source)
+            delete curr;
+        curr = tmp;
+        last_pass = i;
+    }
+
+    float residual = num_steps - last_pass;
+    if (residual > 0.0f)
+    {
+        int next_pass = last_pass * 2;
+        float ratio = residual / (next_pass - last_pass);
+
+        // Downsample and upsample one more step
+        Texture *extra_down = kawase_downsample(*curr, full_size_x, full_size_y, next_pass, 0.5f + 0.5f * ratio);
+        Texture *extra_up =
+            kawase_upsample(*extra_down, full_size_x, full_size_y, last_pass, 0.5f + 0.5f * ratio, nullptr);
+        delete extra_down;
+
+        // Mix current with that extra step based on ratio
+        Texture *tmp = kawase_mix(*curr, *extra_up, ratio);
+        delete extra_up;
+        if (curr != state.tex_source)
+            delete curr;
+        curr = tmp;
+    }
+
+    // Upsample.
+    for (int i = last_pass / 2; i >= 1; i /= 2)
+    {
+        bool is_last = i == 1;
+        Texture *tmp = kawase_upsample(*curr, full_size_x, full_size_y, i, 1.0f, is_last ? state.tex_blurred : nullptr);
+        if (curr != state.tex_source)
+            delete curr;
+        curr = tmp;
+    }
+}
+
+static void update_blur()
+{
+    switch (state.ui.blur_mode)
+    {
+    case BLUR_GAUSSIAN:
+        blur_gaussian();
+        break;
+    case BLUR_DUAL_KAWASE:
+        blur_dual_kawase();
+        break;
+    }
+}
 
 static const char *get_filename_part(const char *path)
 {
@@ -293,50 +507,18 @@ static void load_exr_file(const char *filepath)
         return;
     }
 
-    sg_uninit_image(state.img_src);
     state.img_info.width = width;
     state.img_info.height = height;
     state.img_info.name = get_filename_part(filepath);
-    {
-        sg_image_desc img_desc = { .width = width,
-            .height = height,
-            .pixel_format = SG_PIXELFORMAT_RGBA32F,
-            .label = "source-image",
-            .num_mipmaps = 1,
-            .data.mip_levels[0] = { .ptr = img, .size = sizeof(float) * width * height * 4 } };
-        sg_init_image(state.img_src, &img_desc);
-    }
+
+    delete state.tex_source;
+    state.tex_source = new Texture(width, height, 4, img, "source-image");
     free(img);
 
-    sg_uninit_image(state.img_blurred);
-    sg_uninit_image(state.img_blur_tmp);
-    {
-        sg_image_desc img_desc = {
-            .width = width,
-            .height = height,
-            .pixel_format = SG_PIXELFORMAT_RGBA32F,
-            .usage.color_attachment = true,
-            .sample_count = 1,
-            .label = "blurred-image",
-            .num_mipmaps = 1,
-        };
-        sg_init_image(state.img_blurred, &img_desc);
-        img_desc.label = "blurred-tmp";
-        sg_init_image(state.img_blur_tmp, &img_desc);
-    }
-
-    {
-        sg_uninit_view(state.view_tex_src);
-        sg_uninit_view(state.view_tex_blur_tmp);
-        sg_uninit_view(state.view_tex_blurred);
-        sg_uninit_view(state.view_rt_blur_tmp);
-        sg_uninit_view(state.view_rt_blurred);
-        sg_init_view(state.view_tex_src, sg_view_desc{ .texture.image = state.img_src });
-        sg_init_view(state.view_tex_blur_tmp, sg_view_desc{ .texture.image = state.img_blur_tmp });
-        sg_init_view(state.view_tex_blurred, sg_view_desc{ .texture.image = state.img_blurred });
-        sg_init_view(state.view_rt_blur_tmp, sg_view_desc{ .color_attachment.image = state.img_blur_tmp });
-        sg_init_view(state.view_rt_blurred, sg_view_desc{ .color_attachment.image = state.img_blurred });
-    }
+    delete state.tex_blurred;
+    delete state.tex_blurred_tmp;
+    state.tex_blurred = new Texture(width, height, "blurred-image");
+    state.tex_blurred_tmp = new Texture(width, height, "blurred-tmp");
 
     update_blur();
 }
@@ -362,16 +544,17 @@ static void ui_draw()
     ImGui::SetNextWindowBgAlpha(0.75f);
     if (ImGui::Begin("Controls", 0, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize))
     {
-        // if (ImGui::Combo("Image", &state.ui.selected, files,
-        // IM_ARRAYSIZE(files))) {
-        //     fetch_async(files[state.ui.selected]);
-        // }
         ImGui::Text("Width:   %d", state.img_info.width);
         ImGui::Text("Height:  %d", state.img_info.height);
         ImGui::Text("File:    %s", state.img_info.name.c_str());
         ImGui::Separator();
 
         bool changed = false;
+
+        changed |= ImGui::RadioButton("Gaussian", &state.ui.blur_mode, BLUR_GAUSSIAN);
+        ImGui::SameLine();
+        changed |= ImGui::RadioButton("Dual Kawase", &state.ui.blur_mode, BLUR_DUAL_KAWASE);
+
         changed |= ImGui::SliderInt("Blur X", &state.ui.blur_x, 0, 2000, nullptr, ImGuiSliderFlags_Logarithmic);
         ImGui::BeginDisabled(state.ui.lock_xy);
         changed |= ImGui::SliderInt("Blur Y", &state.ui.blur_y, 0, 2000, nullptr, ImGuiSliderFlags_Logarithmic);
@@ -387,6 +570,10 @@ static void ui_draw()
         {
             update_blur();
         }
+
+        // ImGui::Separator();
+        // sg_stats stats = sg_query_stats();
+        // ImGui::Text("Textures: %d", stats.total.images.alive);
     }
     ImGui::End();
 }

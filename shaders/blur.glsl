@@ -14,8 +14,9 @@ void main()
 }
 #pragma sokol @end
 
-#pragma sokol @fs fs_gaussian
+// ======== Gaussian
 
+#pragma sokol @fs fs_gaussian
 in vec2 uv;
 layout(binding = 0) uniform fs_gaussian_params
 {
@@ -40,4 +41,61 @@ void main()
 }
 #pragma sokol @end
 
+// ======== Dual Kawase
+
+#pragma sokol @fs fs_dk_down
+in vec2 uv;
+layout(binding = 0) uniform fs_dk_down_params { vec2 uv_step; };
+layout(binding = 0) uniform texture2D tex;
+layout(binding = 0) uniform sampler smp;
+out vec4 frag_color;
+
+void main()
+{
+    vec4 col = vec4(0.0);
+    col += texture(sampler2D(tex, smp), uv) * 4.0;
+    col += texture(sampler2D(tex, smp), uv + uv_step * vec2(-0.5, -0.5));
+    col += texture(sampler2D(tex, smp), uv + uv_step * vec2(-0.5, +0.5));
+    col += texture(sampler2D(tex, smp), uv + uv_step * vec2(+0.5, -0.5));
+    col += texture(sampler2D(tex, smp), uv + uv_step * vec2(+0.5, +0.5));
+    frag_color = col / 8.0;
+}
+#pragma sokol @end
+
+#pragma sokol @fs fs_dk_up
+in vec2 uv;
+layout(binding = 0) uniform fs_dk_up_params { vec2 uv_step; };
+layout(binding = 0) uniform texture2D tex;
+layout(binding = 0) uniform sampler smp;
+out vec4 frag_color;
+
+void main()
+{
+    vec4 col = vec4(0.0);
+    col += texture(sampler2D(tex, smp), uv + uv_step * vec2(0, -1));
+    col += texture(sampler2D(tex, smp), uv + uv_step * vec2(0, +1));
+    col += texture(sampler2D(tex, smp), uv + uv_step * vec2(-1, 0));
+    col += texture(sampler2D(tex, smp), uv + uv_step * vec2(+1, 0));
+    col += texture(sampler2D(tex, smp), uv + uv_step * vec2(-0.5, -0.5)) * 2.0;
+    col += texture(sampler2D(tex, smp), uv + uv_step * vec2(-0.5, +0.5)) * 2.0;
+    col += texture(sampler2D(tex, smp), uv + uv_step * vec2(+0.5, -0.5)) * 2.0;
+    col += texture(sampler2D(tex, smp), uv + uv_step * vec2(+0.5, +0.5)) * 2.0;
+    frag_color = col / 12.0;
+}
+#pragma sokol @end
+
+#pragma sokol @fs fs_dk_mix
+in vec2 uv;
+layout(binding = 0) uniform fs_dk_mix_params { float ratio; };
+layout(binding = 0) uniform texture2D tex;
+layout(binding = 1) uniform texture2D tex2;
+layout(binding = 0) uniform sampler smp;
+out vec4 frag_color;
+
+void main() { frag_color = mix(texture(sampler2D(tex, smp), uv), texture(sampler2D(tex2, smp), uv), ratio); }
+#pragma sokol @end
+
 #pragma sokol @program blur_gaussian vs_blur fs_gaussian
+#pragma sokol @program blur_dk_down vs_blur fs_dk_down
+#pragma sokol @program blur_dk_up vs_blur fs_dk_up
+#pragma sokol @program blur_dk_mix vs_blur fs_dk_mix
