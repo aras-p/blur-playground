@@ -16,17 +16,25 @@
 #include "../lib/sokol/util/sokol_imgui.h"
 #include "../lib/tinyexr/tinyexr.h"
 
+#include "../shaders/blur.glsl.h"
 #include "../shaders/display_tex.glsl.h"
 
 #include <string>
+#include <vector>
 
 static struct
 {
     sg_pass_action pass_action;
     sg_image img_src;
     sg_image img_blurred;
-    sg_view disp_tex_view;
+    sg_image img_blur_tmp;
+    sg_view view_tex_src;
+    sg_view view_tex_blur_tmp;
+    sg_view view_tex_blurred;
+    sg_view view_rt_blurred;
+    sg_view view_rt_blur_tmp;
     sg_pipeline pip;
+    sg_pipeline pip_gaussian;
     struct
     {
         sg_sampler linear;
@@ -48,7 +56,6 @@ static struct
 } state;
 
 static void ui_draw();
-static void reinit_texview();
 static void apply_viewport();
 static void load_exr_file(const char *filepath);
 
@@ -74,7 +81,12 @@ static void init()
     // pre-allocate handles so we can keep rendering even no image has been loaded yet
     state.img_src = sg_alloc_image();
     state.img_blurred = sg_alloc_image();
-    state.disp_tex_view = sg_alloc_view();
+    state.img_blur_tmp = sg_alloc_image();
+    state.view_tex_src = sg_alloc_view();
+    state.view_tex_blur_tmp = sg_alloc_view();
+    state.view_tex_blurred = sg_alloc_view();
+    state.view_rt_blurred = sg_alloc_view();
+    state.view_rt_blur_tmp = sg_alloc_view();
 
     // a render pipeline
     {
@@ -108,6 +120,18 @@ static void init()
         state.smp.nearest = sg_make_sampler(&desc);
     }
 
+    // pipelines for blurring
+    {
+        sg_pipeline_desc desc = {
+            .shader = sg_make_shader(blur_gaussian_shader_desc(sg_query_backend())),
+            .colors[0].pixel_format = SG_PIXELFORMAT_RGBA32F,
+            .depth.pixel_format = SG_PIXELFORMAT_NONE,
+            .primitive_type = SG_PRIMITIVETYPE_TRIANGLE_STRIP,
+            .label = "pipe-blur-gaussian",
+        };
+        state.pip_gaussian = sg_make_pipeline(&desc);
+    }
+
     load_exr_file("exr/test.exr");
 }
 
@@ -130,7 +154,7 @@ static void frame()
 
     {
         sg_bindings bind = {
-            .views[VIEW_tex] = state.disp_tex_view,
+            .views[VIEW_tex] = state.ui.show_original ? state.view_tex_src : state.view_tex_blurred,
             .samplers[SMP_smp] = state.smp.nearest,
         };
         sg_apply_bindings(&bind);
@@ -142,14 +166,103 @@ static void frame()
     sg_commit();
 }
 
-static void reinit_texview()
+static float gauss_kernel_value(float x)
 {
-    sg_uninit_view(state.disp_tex_view);
-    sg_view_desc desc = {
-        .texture = { .image = state.ui.show_original ? state.img_src : state.img_blurred },
-    };
-    sg_init_view(state.disp_tex_view, &desc);
+    constexpr float scale = 1.6f;
+    constexpr float two_scale2 = 2.0f * scale * scale;
+    x = fabsf(x);
+    x *= 3.0f * scale;
+    return 1.0f / sqrtf(float(M_PI) * two_scale2) * expf(-x * x / two_scale2);
 }
+
+static sg_image calc_gaussian_weights(float radius, int &r_size)
+{
+    // Kernel size is radius+1, but since it is symmetric we only store
+    // one half.
+    const int size = ceilf(radius) + 1;
+    std::vector<float> result(size);
+
+    float sum = 0.0f;
+
+    // Center weight
+    const float center_weight = gauss_kernel_value(0.0f);
+    result[0] = center_weight;
+    sum += center_weight;
+
+    // Other weights in the positive direction. Add double to the sum, to account for
+    // the negative direction as well.
+    const float scale = radius > 0.0f ? 1.0f / radius : 0.0f;
+    for (int i = 1; i < size; ++i)
+    {
+        const float weight = gauss_kernel_value(i * scale);
+        result[i] = weight;
+        sum += weight * 2.0f;
+    }
+
+    // Normalize the weights
+    for (int i = 0; i < size; ++i)
+    {
+        result[i] /= sum;
+    }
+    r_size = size;
+
+    // Create texture
+    sg_image_desc img_desc = { .width = size,
+        .height = 1,
+        .pixel_format = SG_PIXELFORMAT_R32F,
+        .label = "gaussian-kernel",
+        .num_mipmaps = 1,
+        .data.mip_levels[0] = { .ptr = result.data(), .size = sizeof(float) * size } };
+    return sg_make_image(&img_desc);
+}
+
+static void gaussian_pass(bool horizontal, float radius)
+{
+    int weights_size;
+    sg_image img_weights = calc_gaussian_weights(radius, weights_size);
+    sg_view view_weights = sg_make_view(sg_view_desc{ .texture.image = img_weights });
+
+    const fs_gaussian_params_t par = {
+        .uv_step[0] = horizontal ? 1.0f / state.img_info.width : 0.0f,
+        .uv_step[1] = horizontal ? 0.0f : 1.0f / state.img_info.height,
+        .kernel_width = weights_size,
+    };
+    sg_pass pass = {
+        .action = {
+            .colors[0] = {
+                .load_action = SG_LOADACTION_DONTCARE,
+            },
+        },
+        .attachments = {
+            .colors[0] = horizontal ? state.view_rt_blur_tmp : state.view_rt_blurred,
+        },
+    };
+    sg_begin_pass(&pass);
+    sg_apply_pipeline(state.pip_gaussian);
+
+    {
+        sg_bindings bind = {
+            .views[VIEW_tex] = horizontal ? state.view_tex_src : state.view_tex_blur_tmp,
+            .views[VIEW_tex_kernel] = view_weights,
+            .samplers[SMP_smp] = state.smp.nearest,
+        };
+        sg_apply_bindings(&bind);
+    }
+    sg_apply_uniforms(UB_fs_gaussian_params, SG_RANGE(par));
+    sg_draw(0, 4, 1);
+    sg_end_pass();
+
+    sg_destroy_image(img_weights);
+    sg_destroy_view(view_weights);
+}
+
+static void blur_gaussian()
+{
+    gaussian_pass(true, state.ui.blur_x);
+    gaussian_pass(false, state.ui.blur_y);
+}
+
+static void update_blur() { blur_gaussian(); }
 
 static const char *get_filename_part(const char *path)
 {
@@ -196,6 +309,7 @@ static void load_exr_file(const char *filepath)
     free(img);
 
     sg_uninit_image(state.img_blurred);
+    sg_uninit_image(state.img_blur_tmp);
     {
         sg_image_desc img_desc = {
             .width = width,
@@ -207,9 +321,24 @@ static void load_exr_file(const char *filepath)
             .num_mipmaps = 1,
         };
         sg_init_image(state.img_blurred, &img_desc);
+        img_desc.label = "blurred-tmp";
+        sg_init_image(state.img_blur_tmp, &img_desc);
     }
 
-    reinit_texview();
+    {
+        sg_uninit_view(state.view_tex_src);
+        sg_uninit_view(state.view_tex_blur_tmp);
+        sg_uninit_view(state.view_tex_blurred);
+        sg_uninit_view(state.view_rt_blur_tmp);
+        sg_uninit_view(state.view_rt_blurred);
+        sg_init_view(state.view_tex_src, sg_view_desc{ .texture.image = state.img_src });
+        sg_init_view(state.view_tex_blur_tmp, sg_view_desc{ .texture.image = state.img_blur_tmp });
+        sg_init_view(state.view_tex_blurred, sg_view_desc{ .texture.image = state.img_blurred });
+        sg_init_view(state.view_rt_blur_tmp, sg_view_desc{ .color_attachment.image = state.img_blur_tmp });
+        sg_init_view(state.view_rt_blurred, sg_view_desc{ .color_attachment.image = state.img_blurred });
+    }
+
+    update_blur();
 }
 
 static void input(const sapp_event *ev)
@@ -241,18 +370,22 @@ static void ui_draw()
         ImGui::Text("Height:  %d", state.img_info.height);
         ImGui::Text("File:    %s", state.img_info.name.c_str());
         ImGui::Separator();
-        ImGui::SliderInt("Blur X", &state.ui.blur_x, 1, 2000, nullptr, ImGuiSliderFlags_Logarithmic);
+
+        bool changed = false;
+        changed |= ImGui::SliderInt("Blur X", &state.ui.blur_x, 0, 2000, nullptr, ImGuiSliderFlags_Logarithmic);
         ImGui::BeginDisabled(state.ui.lock_xy);
-        ImGui::SliderInt("Blur Y", &state.ui.blur_y, 1, 2000, nullptr, ImGuiSliderFlags_Logarithmic);
+        changed |= ImGui::SliderInt("Blur Y", &state.ui.blur_y, 0, 2000, nullptr, ImGuiSliderFlags_Logarithmic);
         ImGui::EndDisabled();
-        ImGui::Checkbox("Lock X&Y", &state.ui.lock_xy);
-        if (ImGui::Checkbox("Show Original", &state.ui.show_original))
-        {
-            reinit_texview();
-        }
+        changed |= ImGui::Checkbox("Lock X&Y", &state.ui.lock_xy);
+        ImGui::Checkbox("Show Original", &state.ui.show_original);
         if (state.ui.lock_xy)
         {
             state.ui.blur_y = state.ui.blur_x;
+        }
+
+        if (changed)
+        {
+            update_blur();
         }
     }
     ImGui::End();
