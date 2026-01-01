@@ -14,11 +14,11 @@ void main()
 }
 #pragma sokol @end
 
-// ======== Gaussian
+// ======== Separable kernel
 
-#pragma sokol @fs fs_gaussian
+#pragma sokol @fs fs_separable
 in vec2 uv;
-layout(binding = 0) uniform fs_gaussian_params
+layout(binding = 0) uniform fs_separable_params
 {
     vec2 uv_step;
     int kernel_width;
@@ -95,7 +95,7 @@ out vec4 frag_color;
 void main() { frag_color = mix(texture(sampler2D(tex, smp), uv), texture(sampler2D(tex2, smp), uv), ratio); }
 #pragma sokol @end
 
-#pragma sokol @program blur_gaussian vs_blur fs_gaussian
+#pragma sokol @program blur_separable vs_blur fs_separable
 #pragma sokol @program blur_dk_down vs_blur fs_dk_down
 #pragma sokol @program blur_dk_up vs_blur fs_dk_up
 #pragma sokol @program blur_dk_mix vs_blur fs_dk_mix

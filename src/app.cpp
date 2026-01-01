@@ -14,12 +14,6 @@
 #include <string>
 #include <vector>
 
-enum BlurMode
-{
-    BLUR_GAUSSIAN = 0,
-    BLUR_DUAL_KAWASE = 1,
-};
-
 static struct
 {
     sg_pass_action pass_action;
@@ -147,15 +141,8 @@ static void frame()
 
 static void update_blur()
 {
-    switch (state.ui.blur_mode)
-    {
-    case BLUR_GAUSSIAN:
-        blur_gaussian(state.blur_ctx, state.tex_source, state.tex_blurred, state.ui.blur_x, state.ui.blur_y);
-        break;
-    case BLUR_DUAL_KAWASE:
-        blur_dual_kawase(state.blur_ctx, state.tex_source, state.tex_blurred, state.ui.blur_x, state.ui.blur_y);
-        break;
-    }
+    blur_calc(state.blur_ctx, state.tex_source, state.tex_blurred, BlurMode(state.ui.blur_mode), state.ui.blur_x,
+        state.ui.blur_y);
 }
 
 static const char *get_filename_part(const char *path)
@@ -230,8 +217,9 @@ static void ui_draw()
 
         bool changed = false;
 
+        changed |= ImGui::RadioButton("Box", &state.ui.blur_mode, BLUR_BOX);
+        changed |= ImGui::RadioButton("Tent", &state.ui.blur_mode, BLUR_TENT);
         changed |= ImGui::RadioButton("Gaussian", &state.ui.blur_mode, BLUR_GAUSSIAN);
-        ImGui::SameLine();
         changed |= ImGui::RadioButton("Dual Kawase", &state.ui.blur_mode, BLUR_DUAL_KAWASE);
 
         changed |= ImGui::SliderInt(

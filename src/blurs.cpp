@@ -3,19 +3,20 @@
 
 #include "../shaders/blur.glsl.h"
 
+#include <assert.h>
 #include <vector>
 
 // ======== Context
 
 struct BlurContext
 {
-    sg_pipeline pip_gaussian;
+    sg_pipeline pip_separable;
     sg_pipeline pip_dk_down, pip_dk_up, pip_dk_mix;
     sg_sampler smp_linear, smp_nearest;
 
     ~BlurContext()
     {
-        sg_destroy_pipeline(pip_gaussian);
+        sg_destroy_pipeline(pip_separable);
         sg_destroy_pipeline(pip_dk_down);
         sg_destroy_pipeline(pip_dk_down);
         sg_destroy_pipeline(pip_dk_mix);
@@ -27,12 +28,12 @@ struct BlurContext
 BlurContext *blur_ctx_initialize()
 {
     BlurContext *ctx = new BlurContext{};
-    ctx->pip_gaussian = sg_make_pipeline(sg_pipeline_desc{
-        .shader = sg_make_shader(blur_gaussian_shader_desc(sg_query_backend())),
+    ctx->pip_separable = sg_make_pipeline(sg_pipeline_desc{
+        .shader = sg_make_shader(blur_separable_shader_desc(sg_query_backend())),
         .colors[0].pixel_format = SG_PIXELFORMAT_RGBA32F,
         .depth.pixel_format = SG_PIXELFORMAT_NONE,
         .primitive_type = SG_PRIMITIVETYPE_TRIANGLE_STRIP,
-        .label = "pipe-blur-gaussian",
+        .label = "pipe-blur-separable",
     });
     ctx->pip_dk_down = sg_make_pipeline(sg_pipeline_desc{
         .shader = sg_make_shader(blur_dk_down_shader_desc(sg_query_backend())),
@@ -77,18 +78,31 @@ BlurContext *blur_ctx_initialize()
 
 void blur_ctx_cleanup(BlurContext *ctx) { delete ctx; }
 
-// ======== Gaussian blur
+// ======== Separable kernel blur
 
-static float gauss_kernel_value(float x)
+static float separable_kernel_value(BlurMode mode, float x)
 {
-    constexpr float scale = 1.6f;
-    constexpr float two_scale2 = 2.0f * scale * scale;
     x = fabsf(x);
-    x *= 3.0f * scale;
-    return 1.0f / sqrtf(float(M_PI) * two_scale2) * expf(-x * x / two_scale2);
+    switch (mode)
+    {
+    case BLUR_BOX:
+        return x > 1.0f ? 0.0f : 1.0f;
+    case BLUR_TENT:
+        return x > 1.0f ? 0.0f : 1.0f - x;
+    case BLUR_GAUSSIAN:
+    {
+        constexpr float scale = 1.6f;
+        constexpr float two_scale2 = 2.0f * scale * scale;
+        x *= 3.0f * scale;
+        return 1.0f / sqrtf(float(M_PI) * two_scale2) * expf(-x * x / two_scale2);
+    }
+    default:
+        assert(false);
+        return 0.0f;
+    }
 }
 
-static Texture *calc_gaussian_weights(float radius)
+static Texture *calc_separable_weights(BlurMode mode, float radius)
 {
     // Kernel size is radius+1, but since it is symmetric we only store
     // one half.
@@ -98,7 +112,7 @@ static Texture *calc_gaussian_weights(float radius)
     float sum = 0.0f;
 
     // Center weight
-    const float center_weight = gauss_kernel_value(0.0f);
+    const float center_weight = separable_kernel_value(mode, 0.0f);
     result[0] = center_weight;
     sum += center_weight;
 
@@ -107,7 +121,7 @@ static Texture *calc_gaussian_weights(float radius)
     const float scale = radius > 0.0f ? 1.0f / radius : 0.0f;
     for (int i = 1; i < size; ++i)
     {
-        const float weight = gauss_kernel_value(i * scale);
+        const float weight = separable_kernel_value(mode, i * scale);
         result[i] = weight;
         sum += weight * 2.0f;
     }
@@ -118,14 +132,15 @@ static Texture *calc_gaussian_weights(float radius)
         result[i] /= sum;
     }
 
-    return new Texture(size, 1, 1, result.data(), "gaussian-kernel");
+    return new Texture(size, 1, 1, result.data(), "separable-kernel");
 }
 
-static void gaussian_pass(BlurContext *ctx, Texture *input, Texture *output, bool horizontal, float radius)
+static void separable_pass(
+    BlurContext *ctx, Texture *input, Texture *output, BlurMode mode, bool horizontal, float radius)
 {
-    Texture *weights = calc_gaussian_weights(radius);
+    Texture *weights = calc_separable_weights(mode, radius);
 
-    const fs_gaussian_params_t par = {
+    const fs_separable_params_t par = {
         .uv_step[0] = horizontal ? 1.0f / input->width : 0.0f,
         .uv_step[1] = horizontal ? 0.0f : 1.0f / input->height,
         .kernel_width = weights->width,
@@ -137,7 +152,7 @@ static void gaussian_pass(BlurContext *ctx, Texture *input, Texture *output, boo
         },
     };
     sg_begin_pass(&pass);
-    sg_apply_pipeline(ctx->pip_gaussian);
+    sg_apply_pipeline(ctx->pip_separable);
 
     {
         sg_bindings bind = {
@@ -147,18 +162,18 @@ static void gaussian_pass(BlurContext *ctx, Texture *input, Texture *output, boo
         };
         sg_apply_bindings(&bind);
     }
-    sg_apply_uniforms(UB_fs_gaussian_params, SG_RANGE(par));
+    sg_apply_uniforms(UB_fs_separable_params, SG_RANGE(par));
     sg_draw(0, 4, 1);
     sg_end_pass();
 
     delete weights;
 }
 
-void blur_gaussian(BlurContext *ctx, Texture *input, Texture *output, float radius_x, float radius_y)
+void blur_separable(BlurContext *ctx, Texture *input, Texture *output, BlurMode mode, float radius_x, float radius_y)
 {
     Texture *tmp = new Texture(input->width, input->height, "blur-gauss-tmp");
-    gaussian_pass(ctx, input, tmp, true, radius_x);
-    gaussian_pass(ctx, tmp, output, false, radius_y);
+    separable_pass(ctx, input, tmp, mode, true, radius_x);
+    separable_pass(ctx, tmp, output, mode, false, radius_y);
     delete tmp;
 }
 
@@ -299,4 +314,12 @@ void blur_dual_kawase(BlurContext *ctx, Texture *input, Texture *output, float r
             delete curr;
         curr = tmp;
     }
+}
+
+void blur_calc(BlurContext *ctx, Texture *input, Texture *output, BlurMode mode, float radius_x, float radius_y)
+{
+    if (mode == BLUR_DUAL_KAWASE)
+        blur_dual_kawase(ctx, input, output, radius_x, radius_y);
+    else
+        blur_separable(ctx, input, output, mode, radius_x, radius_y);
 }
