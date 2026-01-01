@@ -23,6 +23,7 @@ endfunction()
 
 add_executable (blur_playground
 	src/app.cpp
+    src/lib_impl.cpp
     shaders/blur.glsl
     shaders/display_tex.glsl
     lib/imgui/imgui.cpp
