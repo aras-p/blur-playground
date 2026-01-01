@@ -11,6 +11,8 @@
 
 #include "../shaders/display_tex.glsl.h"
 
+#include <algorithm>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -29,24 +31,22 @@ static struct
     } smp;
     struct
     {
-        int width;
-        int height;
-        std::string name;
-    } img_info;
-    struct
-    {
         int blur_mode = BLUR_GAUSSIAN;
         bool show_original = false;
         bool log_slider = true;
         int blur_x = 20.0f;
         int blur_y = 20.0f;
         bool lock_xy = true;
+        std::vector<std::string> exr_files;
+        int selected_file_index = -1;
+        std::string dragged_file_name;
     } ui;
 } state;
 
 static void ui_draw();
 static void apply_viewport();
 static void load_exr_file(const char *filepath);
+static void scan_exr_files();
 
 static void init()
 {
@@ -103,7 +103,47 @@ static void init()
         state.smp.nearest = sg_make_sampler(&desc);
     }
 
-    load_exr_file("exr/test.exr");
+    scan_exr_files();
+    if (!state.ui.exr_files.empty())
+    {
+        state.ui.selected_file_index = 0;
+        load_exr_file(state.ui.exr_files[0].c_str());
+    }
+}
+
+static void scan_exr_files()
+{
+    state.ui.exr_files.clear();
+
+    auto scan_directory = [](const std::filesystem::path &dir)
+    {
+        for (const auto &entry : std::filesystem::directory_iterator(dir))
+        {
+            if (entry.is_regular_file() && entry.path().extension() == ".exr")
+            {
+                state.ui.exr_files.push_back(entry.path().string());
+            }
+        }
+    };
+
+    try
+    {
+        std::filesystem::path current_dir = std::filesystem::current_path();
+        scan_directory(current_dir);
+        for (const auto &entry : std::filesystem::directory_iterator(current_dir))
+        {
+            if (entry.is_directory())
+            {
+                scan_directory(entry.path());
+            }
+        }
+    }
+    catch (const std::filesystem::filesystem_error &)
+    {
+        // ignore errors
+    }
+
+    std::sort(state.ui.exr_files.begin(), state.ui.exr_files.end());
 }
 
 static void frame()
@@ -174,10 +214,6 @@ static void load_exr_file(const char *filepath)
         return;
     }
 
-    state.img_info.width = width;
-    state.img_info.height = height;
-    state.img_info.name = get_filename_part(filepath);
-
     delete state.tex_source;
     state.tex_source = new Texture(width, height, 4, img, "source-image");
     free(img);
@@ -193,7 +229,10 @@ static void input(const sapp_event *ev)
     simgui_handle_event(ev);
     if (ev->type == SAPP_EVENTTYPE_FILES_DROPPED)
     {
-        load_exr_file(sapp_get_dropped_file_path(0));
+        const char *path = sapp_get_dropped_file_path(0);
+        load_exr_file(path);
+        state.ui.dragged_file_name = get_filename_part(path);
+        state.ui.selected_file_index = -1;
     }
 }
 
@@ -210,10 +249,39 @@ static void ui_draw()
     ImGui::SetNextWindowBgAlpha(0.75f);
     if (ImGui::Begin("Controls", 0, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize))
     {
-        ImGui::Text("Width:   %d", state.img_info.width);
-        ImGui::Text("Height:  %d", state.img_info.height);
-        ImGui::Text("File:    %s", state.img_info.name.c_str());
-        ImGui::Separator();
+        if (!state.ui.dragged_file_name.empty())
+        {
+            ImGui::Text("Dropped: %s", state.ui.dragged_file_name.c_str());
+        }
+        if (!state.ui.exr_files.empty())
+        {
+            ImGui::Text("Files:");
+            if (ImGui::BeginListBox("##exr_files", ImVec2(-FLT_MIN, 5.25f * ImGui::GetTextLineHeightWithSpacing())))
+            {
+                for (int i = 0; i < (int)state.ui.exr_files.size(); i++)
+                {
+                    const char *filename = get_filename_part(state.ui.exr_files[i].c_str());
+                    bool is_selected = (state.ui.selected_file_index == i);
+                    if (ImGui::Selectable(filename, is_selected))
+                    {
+                        state.ui.selected_file_index = i;
+                        state.ui.dragged_file_name.clear();
+                        load_exr_file(state.ui.exr_files[i].c_str());
+                    }
+                    if (is_selected)
+                        ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndListBox();
+            }
+            ImGui::Separator();
+        }
+
+        if (state.tex_source)
+        {
+            ImGui::Text("Width:   %d", state.tex_source->width);
+            ImGui::Text("Height:  %d", state.tex_source->height);
+            ImGui::Separator();
+        }
 
         bool changed = false;
 
@@ -240,10 +308,6 @@ static void ui_draw()
         {
             update_blur();
         }
-
-        // ImGui::Separator();
-        // sg_stats stats = sg_query_stats();
-        // ImGui::Text("Textures: %d", stats.total.images.alive);
     }
     ImGui::End();
 }
@@ -251,7 +315,9 @@ static void ui_draw()
 // set viewport to keep image aspect ratio correct regardless of window size
 static void apply_viewport()
 {
-    if ((state.img_info.width == 0) || (state.img_info.height == 0))
+    int width = state.tex_source ? state.tex_source->width : 0;
+    int height = state.tex_source ? state.tex_source->height : 0;
+    if ((width == 0) || (height == 0))
     {
         return;
     }
@@ -267,8 +333,8 @@ static void apply_viewport()
         canvas_height = 1.0f;
     }
     const float canvas_aspect = canvas_width / canvas_height;
-    const float img_width = (float)state.img_info.width;
-    const float img_height = (float)state.img_info.height;
+    const float img_width = (float)width;
+    const float img_height = (float)height;
     const float img_aspect = img_width / img_height;
     float vp_x, vp_y, vp_w, vp_h;
     if (img_aspect < canvas_aspect)
