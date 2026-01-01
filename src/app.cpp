@@ -112,6 +112,7 @@ static struct
     {
         int blur_mode = BLUR_GAUSSIAN;
         bool show_original = false;
+        bool log_slider = true;
         int blur_x = 20.0f;
         int blur_y = 20.0f;
         bool lock_xy = true;
@@ -555,11 +556,14 @@ static void ui_draw()
         ImGui::SameLine();
         changed |= ImGui::RadioButton("Dual Kawase", &state.ui.blur_mode, BLUR_DUAL_KAWASE);
 
-        changed |= ImGui::SliderInt("Blur X", &state.ui.blur_x, 0, 2000, nullptr, ImGuiSliderFlags_Logarithmic);
+        changed |= ImGui::SliderInt(
+            "Blur X", &state.ui.blur_x, 0, 2000, nullptr, state.ui.log_slider ? ImGuiSliderFlags_Logarithmic : 0);
         ImGui::BeginDisabled(state.ui.lock_xy);
-        changed |= ImGui::SliderInt("Blur Y", &state.ui.blur_y, 0, 2000, nullptr, ImGuiSliderFlags_Logarithmic);
+        changed |= ImGui::SliderInt(
+            "Blur Y", &state.ui.blur_y, 0, 2000, nullptr, state.ui.log_slider ? ImGuiSliderFlags_Logarithmic : 0);
         ImGui::EndDisabled();
         changed |= ImGui::Checkbox("Lock X&Y", &state.ui.lock_xy);
+        ImGui::Checkbox("Log Sliders", &state.ui.log_slider);
         ImGui::Checkbox("Show Original", &state.ui.show_original);
         if (state.ui.lock_xy)
         {
