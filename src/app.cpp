@@ -6,9 +6,10 @@
 #include "../lib/sokol/sokol_app.h"
 #include "../lib/sokol/sokol_glue.h"
 #include "../lib/sokol/sokol_log.h"
+#include "../lib/sokol/sokol_time.h"
 #include "../lib/sokol/util/sokol_imgui.h"
-#include "../lib/tinyexr/tinyexr.h"
 #include "../lib/stb/stb_image.h"
+#include "../lib/tinyexr/tinyexr.h"
 
 #include "../shaders/display_tex.glsl.h"
 
@@ -43,15 +44,30 @@ static struct
         int selected_file_index = -1;
         std::string dragged_file_name;
     } ui;
+    struct
+    {
+        bool running = false;
+        int current_index = 0;
+        int total_cases = 0;
+        double start_time = 0.0;
+        double result_time = 0.0;
+        bool has_result = false;
+        std::vector<int> values;
+        int prev_blur_x = 0;
+        int prev_blur_y = 0;
+        bool prev_lock_xy = false;
+    } bench;
 } state;
 
 static void ui_draw();
 static void apply_viewport();
 static void load_image_file(const char *filepath);
 static void scan_image_files();
+static void update_blur();
 
 static void init()
 {
+    stm_setup();
     {
         sg_desc desc = {
             .environment = sglue_environment(),
@@ -155,6 +171,74 @@ static void scan_image_files()
     std::sort(state.ui.image_files.begin(), state.ui.image_files.end());
 }
 
+static void benchmark_generate_values()
+{
+    state.bench.values.clear();
+    for (float v = 5.0f; v < 1000.0f; v *= 1.2f)
+    {
+        state.bench.values.push_back(std::max(1, (int)roundf(v)));
+    }
+}
+
+static void benchmark_start()
+{
+    if (!state.tex_source)
+        return;
+
+    benchmark_generate_values();
+    state.bench.prev_blur_x = state.ui.blur_x;
+    state.bench.prev_blur_y = state.ui.blur_y;
+    state.bench.prev_lock_xy = state.ui.lock_xy;
+    state.bench.running = true;
+    state.bench.current_index = 0;
+    int n = (int)state.bench.values.size();
+    state.bench.total_cases = n * n;
+    state.bench.start_time = stm_sec(stm_now());
+    state.bench.has_result = false;
+}
+
+static void benchmark_stop()
+{
+    state.bench.running = false;
+    state.bench.result_time = stm_sec(stm_now()) - state.bench.start_time;
+    state.bench.has_result = true;
+    // Restore blur to previous values
+    state.ui.blur_x = state.bench.prev_blur_x;
+    state.ui.blur_y = state.bench.prev_blur_y;
+    state.ui.lock_xy = state.bench.prev_lock_xy;
+    update_blur();
+}
+
+static void benchmark_run_step()
+{
+    if (!state.bench.running)
+        return;
+
+    const int cases_per_frame = 10;
+    int n = (int)state.bench.values.size();
+
+    for (int i = 0; i < cases_per_frame && state.bench.current_index < state.bench.total_cases; ++i)
+    {
+        int idx = state.bench.current_index;
+        int xi = idx % n;
+        int yi = idx / n;
+        int blur_x = state.bench.values[xi];
+        int blur_y = state.bench.values[yi];
+        state.ui.blur_x = blur_x;
+        state.ui.blur_y = blur_y;
+        state.ui.lock_xy = false;
+
+        blur_calc(state.blur_ctx, state.tex_source, state.tex_blurred, BlurMode(state.ui.blur_mode), blur_x, blur_y);
+
+        state.bench.current_index++;
+    }
+
+    if (state.bench.current_index >= state.bench.total_cases)
+    {
+        benchmark_stop();
+    }
+}
+
 static void frame()
 {
     simgui_frame_desc_t frame_desc = {
@@ -165,6 +249,8 @@ static void frame()
     };
     simgui_new_frame(&frame_desc);
     ui_draw();
+
+    benchmark_run_step();
 
     sg_pass pass = { .action = state.pass_action, .swapchain = sglue_swapchain() };
     sg_begin_pass(&pass);
@@ -215,7 +301,7 @@ static void load_image_file(const char *filepath)
     int width = 0;
     int height = 0;
     int channels = 0;
-    
+
     // first try stb_image
     float *data = stbi_loadf(filepath, &width, &height, &channels, 4);
     if (data)
@@ -249,7 +335,7 @@ static void load_image_file(const char *filepath)
 static void input(const sapp_event *ev)
 {
     simgui_handle_event(ev);
-    if (ev->type == SAPP_EVENTTYPE_FILES_DROPPED)
+    if (ev->type == SAPP_EVENTTYPE_FILES_DROPPED && !state.bench.running)
     {
         const char *path = sapp_get_dropped_file_path(0);
         load_image_file(path);
@@ -271,6 +357,34 @@ static void ui_draw()
     ImGui::SetNextWindowBgAlpha(0.75f);
     if (ImGui::Begin("Controls", 0, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize))
     {
+        // Benchmark UI
+        if (state.bench.running)
+        {
+            float progress = (float)state.bench.current_index / (float)state.bench.total_cases;
+            ImGui::Text("Benchmark running...");
+            ImGui::ProgressBar(progress, ImVec2(-FLT_MIN, 0), nullptr);
+            ImGui::Text("%d / %d cases", state.bench.current_index, state.bench.total_cases);
+            ImGui::Separator();
+        }
+        else
+        {
+            ImGui::BeginDisabled(!state.tex_source);
+            if (ImGui::Button("Run Benchmark"))
+            {
+                benchmark_start();
+            }
+            ImGui::EndDisabled();
+            if (state.bench.has_result)
+            {
+                ImGui::SameLine();
+                ImGui::Text("%.2f sec", state.bench.result_time);
+            }
+            ImGui::Separator();
+        }
+
+        // Disable controls during benchmark
+        ImGui::BeginDisabled(state.bench.running);
+
         if (!state.ui.dragged_file_name.empty())
         {
             ImGui::Text("Dropped: %s", state.ui.dragged_file_name.c_str());
@@ -330,6 +444,8 @@ static void ui_draw()
         {
             update_blur();
         }
+
+        ImGui::EndDisabled(); // End benchmark disable
     }
     ImGui::End();
 }

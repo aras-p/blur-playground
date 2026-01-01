@@ -13,6 +13,7 @@
 #include "../lib/sokol/sokol_gfx.h"
 #include "../lib/sokol/sokol_glue.h"
 #include "../lib/sokol/sokol_log.h"
+#include "../lib/sokol/sokol_time.h"
 
 #include "../lib/imgui/imgui.h"
 #include "../lib/sokol/util/sokol_imgui.h"
