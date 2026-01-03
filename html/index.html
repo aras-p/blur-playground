@@ -127,6 +127,7 @@
                 <label><input type="radio" name="blurMode" value="tent"> Tent</label>
                 <label><input type="radio" name="blurMode" value="gaussian"> Gaussian</label>
                 <label><input type="radio" name="blurMode" value="dual_kawase"> Dual Kawase</label>
+                <label><input type="radio" name="blurMode" value="split_kawase"> Split Kawase</label>
             </div>
         </div>
 
@@ -352,6 +353,39 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 }
 `;
 
+const SPLIT_KAWASE_STEP_SHADER = DK_VERTEX_SHADER + `
+struct Params {
+    uvStep: vec2f,
+    w00: f32,
+    w05: f32,
+    w10: f32,
+    w15: f32,
+    w20: f32,
+}
+
+@group(0) @binding(0) var texSampler: sampler;
+@group(0) @binding(1) var tex: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+    var col = vec4f(0.0);
+    let st = params.uvStep;
+    col += textureSample(tex, texSampler, in.uv) * params.w00;
+    col += textureSample(tex, texSampler, in.uv + st * (-0.5)) * params.w05;
+    col += textureSample(tex, texSampler, in.uv + st * ( 0.5)) * params.w05;
+    col += textureSample(tex, texSampler, in.uv + st * (-1.0)) * params.w10;
+    col += textureSample(tex, texSampler, in.uv + st * ( 1.0)) * params.w10;
+    col += textureSample(tex, texSampler, in.uv + st * (-1.5)) * params.w15;
+    col += textureSample(tex, texSampler, in.uv + st * ( 1.5)) * params.w15;
+    col += textureSample(tex, texSampler, in.uv + st * (-2.0)) * params.w20;
+    col += textureSample(tex, texSampler, in.uv + st * ( 2.0)) * params.w20;
+    // Normalize by sum of weights
+    let weightSum = params.w00 + (params.w05 + params.w10 + params.w15 + params.w20) * 2.0;
+    return col / weightSum;
+}
+`;
+
 // ============================================================================
 // WebGPU State
 // ============================================================================
@@ -365,6 +399,7 @@ let dkDownPipeline = null;
 let dkUpPipeline = null;
 let dkMixPipeline = null;
 let dkCopyPipeline = null;
+let splitKawasePipeline = null;
 let sampler = null;
 let samplerNearest = null;
 let imageTexture = null;
@@ -382,6 +417,7 @@ const BlurMode = {
     TENT: 'tent',
     GAUSSIAN: 'gaussian',
     DUAL_KAWASE: 'dual_kawase',
+    SPLIT_KAWASE: 'split_kawase',
 };
 
 const blurParams = {
@@ -389,6 +425,9 @@ const blurParams = {
     radiusX: 10,
     radiusY: 10,
     lockRadius: true,
+    // Split Kawase filter configs (matching C++ defaults)
+    splitCfgDown: { w00: 2.120, w05: 0.750, w10: 1.300, w15: 0.100, w20: 0.150 },
+    splitCfgUp:   { w00: 0.000, w05: 2.800, w10: 0.700, w15: 0.000, w20: 0.010 },
 };
 
 // ============================================================================
@@ -529,6 +568,15 @@ async function initWebGPU() {
             layout: 'auto',
             vertex: { module: dkCopyModule, entryPoint: 'vs_main' },
             fragment: { module: dkCopyModule, entryPoint: 'fs_main', targets: [{ format: 'rgba32float' }] },
+            primitive: { topology: 'triangle-list' },
+        });
+
+        // Create Split Kawase pipeline
+        const splitKawaseModule = device.createShaderModule({ code: SPLIT_KAWASE_STEP_SHADER });
+        splitKawasePipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: splitKawaseModule, entryPoint: 'vs_main' },
+            fragment: { module: splitKawaseModule, entryPoint: 'fs_main', targets: [{ format: 'rgba32float' }] },
             primitive: { topology: 'triangle-list' },
         });
 
@@ -1030,6 +1078,130 @@ function blurDualKawase(commandEncoder, input, output) {
 }
 
 // ============================================================================
+// Split Kawase Blur
+// ============================================================================
+
+function splitKawaseStep(commandEncoder, cfg, input, fullSizeX, fullSizeY, divisor, horizontal) {
+    const sizeX = horizontal ? Math.max(Math.floor(fullSizeX / divisor), 1) : fullSizeX;
+    const sizeY = horizontal ? fullSizeY : Math.max(Math.floor(fullSizeY / divisor), 1);
+    const output = createDKTexture(sizeX, sizeY);
+
+    // X or Y component is set to zero based on whether we are doing horizontal or vertical pass
+    const stepX = horizontal ? 1.0 / input.width : 0.0;
+    const stepY = horizontal ? 0.0 : 1.0 / input.height;
+
+    // Params: uvStep (vec2f = 8 bytes) + w00, w05, w10, w15, w20 (5 * f32 = 20 bytes) = 28 bytes, padded to 32
+    const paramsData = new Float32Array([stepX, stepY, cfg.w00, cfg.w05, cfg.w10, cfg.w15, cfg.w20, 0.0]);
+    const paramsBuffer = device.createBuffer({
+        size: 32,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(paramsBuffer, 0, paramsData);
+
+    const bindGroup = device.createBindGroup({
+        layout: splitKawasePipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: sampler },
+            { binding: 1, resource: input.createView() },
+            { binding: 2, resource: { buffer: paramsBuffer } },
+        ],
+    });
+
+    const renderPass = commandEncoder.beginRenderPass({
+        colorAttachments: [{
+            view: output.createView(),
+            loadOp: 'clear',
+            storeOp: 'store',
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        }],
+    });
+
+    renderPass.setPipeline(splitKawasePipeline);
+    renderPass.setBindGroup(0, bindGroup);
+    renderPass.draw(3);
+    renderPass.end();
+
+    return output;
+}
+
+function splitKawaseAxis(commandEncoder, cfgDown, cfgUp, input, output, radius, horizontal, texturesToCleanup) {
+    // Amount of Kawase "steps" to do; this more or less matches the blur amount of Gaussian
+    const numSteps = radius / 3.0;
+
+    const fullSizeX = currentImageSize.width;
+    const fullSizeY = currentImageSize.height;
+
+    let curr = input;
+
+    // Downsample
+    let lastPass = 0;
+    for (let i = 2; i <= numSteps; i *= 2) {
+        const tmp = splitKawaseStep(commandEncoder, cfgDown, curr, fullSizeX, fullSizeY, i, horizontal);
+        if (curr !== input) {
+            texturesToCleanup.push(curr);
+        }
+        curr = tmp;
+        lastPass = i;
+    }
+
+    let residual = numSteps - lastPass;
+    if (residual > 0.0) {
+        let nextPass = Math.max(lastPass, 1) * 2;
+        let ratio = residual / (nextPass - lastPass);
+        lastPass = Math.max(lastPass, 1);
+
+        // Downsample and upsample one more step
+        const extraDown = splitKawaseStep(commandEncoder, cfgDown, curr, fullSizeX, fullSizeY, nextPass, horizontal);
+        const extraUp = splitKawaseStep(commandEncoder, cfgUp, extraDown, fullSizeX, fullSizeY, lastPass, horizontal);
+        texturesToCleanup.push(extraDown);
+
+        // Mix current with that extra step based on ratio
+        kawaseMix(commandEncoder, curr, extraUp, 1.0 - ratio);
+        if (curr !== input) {
+            texturesToCleanup.push(curr);
+        }
+        curr = extraUp;
+    }
+
+    // Upsample
+    for (let i = Math.floor(lastPass / 2); i >= 1; i = Math.floor(i / 2)) {
+        const tmp = splitKawaseStep(commandEncoder, cfgUp, curr, fullSizeX, fullSizeY, i, horizontal);
+        if (curr !== input) {
+            texturesToCleanup.push(curr);
+        }
+        curr = tmp;
+    }
+
+    // Copy to output
+    kawaseCopy(commandEncoder, curr, output);
+    if (curr !== input) {
+        texturesToCleanup.push(curr);
+    }
+}
+
+function blurSplitKawase(commandEncoder, input, output) {
+    const texturesToCleanup = [];
+
+    // Create temp texture for intermediate result between X and Y passes
+    const tmp = createDKTexture(currentImageSize.width, currentImageSize.height);
+
+    // Horizontal pass: input -> tmp
+    splitKawaseAxis(commandEncoder, blurParams.splitCfgDown, blurParams.splitCfgUp,
+        input, tmp, blurParams.radiusX, true, texturesToCleanup);
+
+    // Vertical pass: tmp -> output
+    splitKawaseAxis(commandEncoder, blurParams.splitCfgDown, blurParams.splitCfgUp,
+        tmp, output, blurParams.radiusY, false, texturesToCleanup);
+
+    texturesToCleanup.push(tmp);
+
+    // Schedule cleanup after GPU work completes
+    device.queue.onSubmittedWorkDone().then(() => {
+        texturesToCleanup.forEach(t => t.destroy());
+    });
+}
+
+// ============================================================================
 // Canvas Sizing
 // ============================================================================
 
@@ -1074,6 +1246,10 @@ function render() {
         if (blurParams.mode === BlurMode.DUAL_KAWASE) {
             // Dual Kawase blur
             blurDualKawase(commandEncoder, imageTexture, blurOutputTexture);
+            textureToDisplay = blurOutputTexture;
+        } else if (blurParams.mode === BlurMode.SPLIT_KAWASE) {
+            // Split Kawase blur
+            blurSplitKawase(commandEncoder, imageTexture, blurOutputTexture);
             textureToDisplay = blurOutputTexture;
         } else {
             // Separable blur (Box, Tent, Gaussian)
