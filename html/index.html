@@ -116,8 +116,8 @@
 <body>
     <div class="controls">
         <div class="dropzone" id="dropzone">
-            <input type="file" id="fileInput" accept="image/png,image/jpeg">
-            <span>Click to browse or drag & drop PNG/JPG</span>
+            <input type="file" id="fileInput" accept="image/png,image/jpeg,.exr">
+            <span>Click to browse or drag & drop PNG/JPG/EXR</span>
         </div>
 
         <div class="control-group">
@@ -153,6 +153,8 @@
     <div id="status">WebGPU initializing...</div>
     <div id="error"></div>
 
+<script src="fflate.js"></script>
+<script src="exrloader.js"></script>
 <script>
 // ============================================================================
 // WGSL Shaders
@@ -613,6 +615,16 @@ function createTextureFromLinearData(linearData) {
     return { width, height };
 }
 
+async function loadEXR(file) {
+    const arrayBuffer = await file.arrayBuffer();
+    const result = window.parseEXR(arrayBuffer);
+    return {
+        data: result.data,
+        width: result.width,
+        height: result.height
+    };
+}
+
 async function handleImageFile(file) {
     const statusEl = document.getElementById('status');
     const errorEl = document.getElementById('error');
@@ -621,10 +633,19 @@ async function handleImageFile(file) {
     try {
         statusEl.textContent = 'Loading image...';
 
-        const img = await loadImage(file);
-        statusEl.textContent = `Converting to linear (${img.width}x${img.height})...`;
+        let linearData;
+        const isEXR = file.name.toLowerCase().endsWith('.exr');
 
-        const linearData = imageToLinearFloat(img);
+        if (isEXR) {
+            statusEl.textContent = 'Parsing EXR file...';
+            linearData = await loadEXR(file);
+            statusEl.textContent = `Loaded EXR (${linearData.width}x${linearData.height})`;
+        } else {
+            const img = await loadImage(file);
+            statusEl.textContent = `Converting to linear (${img.width}x${img.height})...`;
+            linearData = imageToLinearFloat(img);
+        }
+
         statusEl.textContent = 'Uploading to GPU...';
 
         const { width, height } = createTextureFromLinearData(linearData);
@@ -649,6 +670,7 @@ async function handleImageFile(file) {
     } catch (e) {
         errorEl.textContent = `Error: ${e.message}`;
         statusEl.textContent = 'Failed to load image.';
+        console.error('Image load error:', e);
     }
 }
 
