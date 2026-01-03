@@ -148,6 +148,14 @@
                 <label for="lockRadius">Lock X & Y</label>
             </div>
         </div>
+
+        <div class="control-group">
+            <div class="checkbox-row">
+                <input type="checkbox" id="calcRmse">
+                <label for="calcRmse">Calculate RMSE vs Gaussian</label>
+            </div>
+            <div id="rmseDisplay" style="font-size: 14px; color: #888;">RMSE: --</div>
+        </div>
     </div>
     <canvas id="canvas" width="800" height="600"></canvas>
     <div id="status">WebGPU initializing...</div>
@@ -329,6 +337,58 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 }
 `;
 
+// Compute shader for RMSE calculation
+const RMSE_COMPUTE_SHADER = `
+const GRP_SIZE: u32 = 16u;
+
+struct Params {
+    numGroupsX: u32,
+}
+
+@group(0) @binding(0) var tex1: texture_2d<f32>;
+@group(0) @binding(1) var tex2: texture_2d<f32>;
+@group(0) @binding(2) var<storage, read_write> rmseOut: array<f32>;
+@group(0) @binding(3) var<uniform> params: Params;
+
+var<workgroup> sharedData: array<f32, 256>; // GRP_SIZE * GRP_SIZE
+
+@compute @workgroup_size(16, 16)
+fn main(
+    @builtin(global_invocation_id) globalId: vec3u,
+    @builtin(local_invocation_id) localId: vec3u,
+    @builtin(workgroup_id) workgroupId: vec3u
+) {
+    let texSize = textureDimensions(tex1);
+    let pixelCoord = vec2i(globalId.xy);
+    let localIndex = localId.y * GRP_SIZE + localId.x;
+
+    // Load pixels, compute squared diff, store in shared memory
+    var squaredDiff: f32 = 0.0;
+    if (pixelCoord.x < i32(texSize.x) && pixelCoord.y < i32(texSize.y)) {
+        let col1 = textureLoad(tex1, pixelCoord, 0).rgb;
+        let col2 = textureLoad(tex2, pixelCoord, 0).rgb;
+        let diff = col1 - col2;
+        squaredDiff = dot(diff, diff);
+    }
+    sharedData[localIndex] = squaredDiff;
+    workgroupBarrier();
+
+    // Parallel sum of diffs in shared mem
+    for (var stride: u32 = 128u; stride > 0u; stride >>= 1u) {
+        if (localIndex < stride) {
+            sharedData[localIndex] += sharedData[localIndex + stride];
+        }
+        workgroupBarrier();
+    }
+
+    // First thread writes out group's sum
+    if (localIndex == 0u) {
+        let workgroupIndex = workgroupId.y * params.numGroupsX + workgroupId.x;
+        rmseOut[workgroupIndex] = sharedData[0];
+    }
+}
+`;
+
 // ============================================================================
 // WebGPU State
 // ============================================================================
@@ -355,6 +415,14 @@ let kawaseUniformBuffers = [];  // Pool of uniform buffers
 let kawaseUniformBufferIndex = 0;
 let kawaseTextureCache = new Map();  // Cache textures by "width,height" key
 
+// RMSE calculation resources
+let rmseComputePipeline = null;
+let rmseResultBuffer = null;       // GPU storage buffer for workgroup results
+let rmseReadBuffer = null;         // Staging buffer for readback
+let rmseUniformBuffer = null;
+let gaussianRefTexture = null;     // Texture for Gaussian reference blur
+let rmseInProgress = false;        // Guard against concurrent RMSE calculations
+
 // ============================================================================
 // Blur Parameters
 // ============================================================================
@@ -372,6 +440,7 @@ const blurParams = {
     radiusX: 10,
     radiusY: 10,
     lockRadius: true,
+    calcRmse: false,
     // Split Kawase filter configs (matching C++ defaults)
     splitCfgDown: { w00: 2.120, w05: 0.750, w10: 1.300, w15: 0.100, w20: 0.150 },
     splitCfgUp:   { w00: 0.000, w05: 2.800, w10: 0.700, w15: 0.000, w20: 0.010 },
@@ -519,6 +588,19 @@ async function initWebGPU() {
             primitive: { topology: 'triangle-list' },
         });
 
+        // Create RMSE compute pipeline
+        const rmseModule = device.createShaderModule({ code: RMSE_COMPUTE_SHADER });
+        rmseComputePipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: { module: rmseModule, entryPoint: 'main' },
+        });
+
+        // Create RMSE uniform buffer (holds numGroupsX)
+        rmseUniformBuffer = device.createBuffer({
+            size: 4,  // u32
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+
         statusEl.textContent = 'WebGPU ready. Load an image to begin.';
         return true;
     } catch (e) {
@@ -594,7 +676,37 @@ function createTextureFromLinearData(linearData) {
     // Clear cached textures (pyramid sizes depend on image size)
     clearTextureCache();
 
+    // Destroy old RMSE resources
+    if (gaussianRefTexture) {
+        gaussianRefTexture.destroy();
+    }
+    if (rmseResultBuffer) {
+        rmseResultBuffer.destroy();
+    }
+    if (rmseReadBuffer) {
+        rmseReadBuffer.destroy();
+    }
+
     imageTexture = createTexture2D(width, height);
+
+    // Create Gaussian reference texture for RMSE calculation
+    gaussianRefTexture = createTexture2D(width, height);
+
+    // Create RMSE result buffers - one f32 per workgroup
+    const numGroupsX = Math.ceil(width / 16);
+    const numGroupsY = Math.ceil(height / 16);
+    const numGroups = numGroupsX * numGroupsY;
+    const bufferSize = numGroups * 4;  // 4 bytes per f32
+
+    rmseResultBuffer = device.createBuffer({
+        size: bufferSize,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+
+    rmseReadBuffer = device.createBuffer({
+        size: bufferSize,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
 
     device.queue.writeTexture(
         { texture: imageTexture },
@@ -1161,7 +1273,7 @@ function fitCanvasToViewport(imageWidth, imageHeight) {
 // Rendering
 // ============================================================================
 
-function render() {
+async function render() {
     if (!device || !imageTexture) return;
 
     const { width, height } = currentImageSize;
@@ -1207,6 +1319,9 @@ function render() {
         }
     }
 
+    // RMSE calculation
+    let shouldCalcRmse = blurParams.calcRmse;
+
     // Create bind group for final display
     const displayBindGroup = device.createBindGroup({
         layout: passthroughPipeline.getBindGroupLayout(0),
@@ -1232,6 +1347,100 @@ function render() {
     renderPass.end();
 
     device.queue.submit([commandEncoder.finish()]);
+
+    // Calculate RMSE if enabled (skip if already in progress)
+    if (shouldCalcRmse && !rmseInProgress) {
+        rmseInProgress = true;
+
+        try {
+            // Reset pools for Gaussian blur calculation
+            resetKawaseUniformBufferPool();
+            resetTextureCache();
+
+            // Calculate Gaussian blur into reference texture
+            const gaussEncoder = device.createCommandEncoder();
+
+            // Horizontal pass: input -> temp
+            if (blurParams.radiusX > 0) {
+                separablePass(gaussEncoder, imageTexture, blurTempTexture, BlurMode.GAUSSIAN, true, blurParams.radiusX);
+            }
+
+            // Vertical pass: temp -> gaussianRef (or input -> gaussianRef if no horizontal)
+            if (blurParams.radiusY > 0) {
+                const vertInput = blurParams.radiusX > 0 ? blurTempTexture : imageTexture;
+                separablePass(gaussEncoder, vertInput, gaussianRefTexture, BlurMode.GAUSSIAN, false, blurParams.radiusY);
+            } else if (blurParams.radiusX > 0) {
+                // Copy temp to gaussianRef if only horizontal blur
+                gaussEncoder.copyTextureToTexture(
+                    { texture: blurTempTexture },
+                    { texture: gaussianRefTexture },
+                    [width, height]
+                );
+            }
+
+            device.queue.submit([gaussEncoder.finish()]);
+
+            await calculateAndDisplayRMSE(width, height);
+        } finally {
+            rmseInProgress = false;
+        }
+    }
+}
+
+async function calculateAndDisplayRMSE(width, height) {
+    const numGroupsX = Math.ceil(width / 16);
+    const numGroupsY = Math.ceil(height / 16);
+    const numGroups = numGroupsX * numGroupsY;
+
+    // Update uniform buffer with numGroupsX
+    device.queue.writeBuffer(rmseUniformBuffer, 0, new Uint32Array([numGroupsX]));
+
+    // Create compute bind group
+    const computeBindGroup = device.createBindGroup({
+        layout: rmseComputePipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: gaussianRefTexture.createView() },
+            { binding: 1, resource: blurOutputTexture.createView() },
+            { binding: 2, resource: { buffer: rmseResultBuffer } },
+            { binding: 3, resource: { buffer: rmseUniformBuffer } },
+        ],
+    });
+
+    const commandEncoder = device.createCommandEncoder();
+
+    // Dispatch compute shader
+    const computePass = commandEncoder.beginComputePass();
+    computePass.setPipeline(rmseComputePipeline);
+    computePass.setBindGroup(0, computeBindGroup);
+    computePass.dispatchWorkgroups(numGroupsX, numGroupsY);
+    computePass.end();
+
+    // Copy results to staging buffer
+    commandEncoder.copyBufferToBuffer(
+        rmseResultBuffer, 0,
+        rmseReadBuffer, 0,
+        numGroups * 4
+    );
+
+    device.queue.submit([commandEncoder.finish()]);
+
+    // Map and read the staging buffer
+    await rmseReadBuffer.mapAsync(GPUMapMode.READ);
+    const results = new Float32Array(rmseReadBuffer.getMappedRange().slice(0));
+    rmseReadBuffer.unmap();
+
+    // Sum all workgroup results
+    let totalSquaredDiff = 0;
+    for (let i = 0; i < numGroups; i++) {
+        totalSquaredDiff += results[i];
+    }
+
+    // Calculate RMSE: sqrt(sum / (numPixels * 3 channels))
+    const numPixels = width * height;
+    const rmse = Math.sqrt(totalSquaredDiff / (numPixels * 3));
+
+    // Display result
+    document.getElementById('rmseDisplay').textContent = `RMSE: ${rmse.toFixed(6)}`;
 }
 
 // ============================================================================
@@ -1335,6 +1544,16 @@ function setupEventHandlers() {
             radiusYValue.textContent = blurParams.radiusX;
             onBlurParamsChanged();
         }
+    });
+
+    // RMSE checkbox
+    const calcRmse = document.getElementById('calcRmse');
+    calcRmse.addEventListener('change', (e) => {
+        blurParams.calcRmse = e.target.checked;
+        if (!e.target.checked) {
+            document.getElementById('rmseDisplay').textContent = 'RMSE: --';
+        }
+        onBlurParamsChanged();
     });
 }
 
