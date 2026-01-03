@@ -126,6 +126,7 @@
                 <label><input type="radio" name="blurMode" value="box" checked> Box</label>
                 <label><input type="radio" name="blurMode" value="tent"> Tent</label>
                 <label><input type="radio" name="blurMode" value="gaussian"> Gaussian</label>
+                <label><input type="radio" name="blurMode" value="dual_kawase"> Dual Kawase</label>
             </div>
         </div>
 
@@ -253,6 +254,104 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 }
 `;
 
+// Shared vertex shader for Dual Kawase (used by all DK shaders)
+const DK_VERTEX_SHADER = `
+struct VertexOutput {
+    @builtin(position) position: vec4f,
+    @location(0) uv: vec2f,
+}
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+    var pos = array<vec2f, 3>(
+        vec2f(-1.0, -1.0),
+        vec2f( 3.0, -1.0),
+        vec2f(-1.0,  3.0)
+    );
+    var uv = array<vec2f, 3>(
+        vec2f(0.0, 1.0),
+        vec2f(2.0, 1.0),
+        vec2f(0.0, -1.0)
+    );
+
+    var output: VertexOutput;
+    output.position = vec4f(pos[vertexIndex], 0.0, 1.0);
+    output.uv = uv[vertexIndex];
+    return output;
+}
+`;
+
+const DK_DOWNSAMPLE_SHADER = DK_VERTEX_SHADER + `
+struct Params {
+    uvStep: vec2f,
+}
+
+@group(0) @binding(0) var texSampler: sampler;
+@group(0) @binding(1) var tex: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+    var col = vec4f(0.0);
+    col += textureSample(tex, texSampler, in.uv) * 4.0;
+    col += textureSample(tex, texSampler, in.uv + params.uvStep * vec2f(-0.5, -0.5));
+    col += textureSample(tex, texSampler, in.uv + params.uvStep * vec2f(-0.5,  0.5));
+    col += textureSample(tex, texSampler, in.uv + params.uvStep * vec2f( 0.5, -0.5));
+    col += textureSample(tex, texSampler, in.uv + params.uvStep * vec2f( 0.5,  0.5));
+    return col / 8.0;
+}
+`;
+
+const DK_UPSAMPLE_SHADER = DK_VERTEX_SHADER + `
+struct Params {
+    uvStep: vec2f,
+}
+
+@group(0) @binding(0) var texSampler: sampler;
+@group(0) @binding(1) var tex: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+    var col = vec4f(0.0);
+    col += textureSample(tex, texSampler, in.uv + params.uvStep * vec2f( 0.0, -1.0));
+    col += textureSample(tex, texSampler, in.uv + params.uvStep * vec2f( 0.0,  1.0));
+    col += textureSample(tex, texSampler, in.uv + params.uvStep * vec2f(-1.0,  0.0));
+    col += textureSample(tex, texSampler, in.uv + params.uvStep * vec2f( 1.0,  0.0));
+    col += textureSample(tex, texSampler, in.uv + params.uvStep * vec2f(-0.5, -0.5)) * 2.0;
+    col += textureSample(tex, texSampler, in.uv + params.uvStep * vec2f(-0.5,  0.5)) * 2.0;
+    col += textureSample(tex, texSampler, in.uv + params.uvStep * vec2f( 0.5, -0.5)) * 2.0;
+    col += textureSample(tex, texSampler, in.uv + params.uvStep * vec2f( 0.5,  0.5)) * 2.0;
+    return col / 12.0;
+}
+`;
+
+const DK_MIX_SHADER = DK_VERTEX_SHADER + `
+struct Params {
+    ratio: f32,
+}
+
+@group(0) @binding(0) var texSampler: sampler;
+@group(0) @binding(1) var tex: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+    let col = textureSample(tex, texSampler, in.uv);
+    return vec4f(col.rgb, params.ratio);
+}
+`;
+
+const DK_COPY_SHADER = DK_VERTEX_SHADER + `
+@group(0) @binding(0) var texSampler: sampler;
+@group(0) @binding(1) var tex: texture_2d<f32>;
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+    return textureSample(tex, texSampler, in.uv);
+}
+`;
+
 // ============================================================================
 // WebGPU State
 // ============================================================================
@@ -262,6 +361,10 @@ let context = null;
 let canvasFormat = null;
 let passthroughPipeline = null;
 let separablePipeline = null;
+let dkDownPipeline = null;
+let dkUpPipeline = null;
+let dkMixPipeline = null;
+let dkCopyPipeline = null;
 let sampler = null;
 let samplerNearest = null;
 let imageTexture = null;
@@ -278,6 +381,7 @@ const BlurMode = {
     BOX: 'box',
     TENT: 'tent',
     GAUSSIAN: 'gaussian',
+    DUAL_KAWASE: 'dual_kawase',
 };
 
 const blurParams = {
@@ -374,6 +478,58 @@ async function initWebGPU() {
             primitive: {
                 topology: 'triangle-list',
             },
+        });
+
+        // Create Dual Kawase pipelines
+        const dkDownModule = device.createShaderModule({ code: DK_DOWNSAMPLE_SHADER });
+        const dkUpModule = device.createShaderModule({ code: DK_UPSAMPLE_SHADER });
+        const dkMixModule = device.createShaderModule({ code: DK_MIX_SHADER });
+        const dkCopyModule = device.createShaderModule({ code: DK_COPY_SHADER });
+
+        dkDownPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: dkDownModule, entryPoint: 'vs_main' },
+            fragment: { module: dkDownModule, entryPoint: 'fs_main', targets: [{ format: 'rgba32float' }] },
+            primitive: { topology: 'triangle-list' },
+        });
+
+        dkUpPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: dkUpModule, entryPoint: 'vs_main' },
+            fragment: { module: dkUpModule, entryPoint: 'fs_main', targets: [{ format: 'rgba32float' }] },
+            primitive: { topology: 'triangle-list' },
+        });
+
+        dkMixPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: dkMixModule, entryPoint: 'vs_main' },
+            fragment: {
+                module: dkMixModule,
+                entryPoint: 'fs_main',
+                targets: [{
+                    format: 'rgba32float',
+                    blend: {
+                        color: {
+                            srcFactor: 'src-alpha',
+                            dstFactor: 'one-minus-src-alpha',
+                            operation: 'add',
+                        },
+                        alpha: {
+                            srcFactor: 'src-alpha',
+                            dstFactor: 'one-minus-src-alpha',
+                            operation: 'add',
+                        },
+                    },
+                }],
+            },
+            primitive: { topology: 'triangle-list' },
+        });
+
+        dkCopyPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: { module: dkCopyModule, entryPoint: 'vs_main' },
+            fragment: { module: dkCopyModule, entryPoint: 'fs_main', targets: [{ format: 'rgba32float' }] },
+            primitive: { topology: 'triangle-list' },
         });
 
         statusEl.textContent = 'WebGPU ready. Load an image to begin.';
@@ -649,6 +805,231 @@ function ensureBlurTextures(width, height) {
 }
 
 // ============================================================================
+// Dual Kawase Blur
+// ============================================================================
+
+function createDKTexture(width, height) {
+    return device.createTexture({
+        size: [width, height],
+        format: 'rgba32float',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+}
+
+function kawaseDownsample(commandEncoder, input, fullSizeX, fullSizeY, divisor, ratio) {
+    const sizeX = Math.max(Math.floor(fullSizeX / divisor), 1);
+    const sizeY = Math.max(Math.floor(fullSizeY / divisor), 1);
+    const output = createDKTexture(sizeX, sizeY);
+
+    // Note: "step" is based on *output* size, which is 2x smaller than input
+    const stepX = ratio / sizeX;
+    const stepY = ratio / sizeY;
+
+    const paramsData = new Float32Array([stepX, stepY]);
+    const paramsBuffer = device.createBuffer({
+        size: 8,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(paramsBuffer, 0, paramsData);
+
+    const bindGroup = device.createBindGroup({
+        layout: dkDownPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: sampler },
+            { binding: 1, resource: input.createView() },
+            { binding: 2, resource: { buffer: paramsBuffer } },
+        ],
+    });
+
+    const renderPass = commandEncoder.beginRenderPass({
+        colorAttachments: [{
+            view: output.createView(),
+            loadOp: 'clear',
+            storeOp: 'store',
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        }],
+    });
+
+    renderPass.setPipeline(dkDownPipeline);
+    renderPass.setBindGroup(0, bindGroup);
+    renderPass.draw(3);
+    renderPass.end();
+
+    return output;
+}
+
+function kawaseUpsample(commandEncoder, input, fullSizeX, fullSizeY, divisor, ratio, existingOutput = null) {
+    const sizeX = Math.max(Math.floor(fullSizeX / divisor), 1);
+    const sizeY = Math.max(Math.floor(fullSizeY / divisor), 1);
+    const output = existingOutput || createDKTexture(sizeX, sizeY);
+
+    // Note: "step" is based on *input* size, which is 2x smaller than output
+    const stepX = ratio / input.width;
+    const stepY = ratio / input.height;
+
+    const paramsData = new Float32Array([stepX, stepY]);
+    const paramsBuffer = device.createBuffer({
+        size: 8,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(paramsBuffer, 0, paramsData);
+
+    const bindGroup = device.createBindGroup({
+        layout: dkUpPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: sampler },
+            { binding: 1, resource: input.createView() },
+            { binding: 2, resource: { buffer: paramsBuffer } },
+        ],
+    });
+
+    const renderPass = commandEncoder.beginRenderPass({
+        colorAttachments: [{
+            view: output.createView(),
+            loadOp: 'clear',
+            storeOp: 'store',
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        }],
+    });
+
+    renderPass.setPipeline(dkUpPipeline);
+    renderPass.setBindGroup(0, bindGroup);
+    renderPass.draw(3);
+    renderPass.end();
+
+    return output;
+}
+
+function kawaseMix(commandEncoder, input, output, ratio) {
+    const paramsData = new Float32Array([ratio]);
+    const paramsBuffer = device.createBuffer({
+        size: 4,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(paramsBuffer, 0, paramsData);
+
+    const bindGroup = device.createBindGroup({
+        layout: dkMixPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: samplerNearest },
+            { binding: 1, resource: input.createView() },
+            { binding: 2, resource: { buffer: paramsBuffer } },
+        ],
+    });
+
+    const renderPass = commandEncoder.beginRenderPass({
+        colorAttachments: [{
+            view: output.createView(),
+            loadOp: 'load',  // Important: load existing content for blending
+            storeOp: 'store',
+        }],
+    });
+
+    renderPass.setPipeline(dkMixPipeline);
+    renderPass.setBindGroup(0, bindGroup);
+    renderPass.draw(3);
+    renderPass.end();
+}
+
+function kawaseCopy(commandEncoder, input, output) {
+    const bindGroup = device.createBindGroup({
+        layout: dkCopyPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: samplerNearest },
+            { binding: 1, resource: input.createView() },
+        ],
+    });
+
+    const renderPass = commandEncoder.beginRenderPass({
+        colorAttachments: [{
+            view: output.createView(),
+            loadOp: 'clear',
+            storeOp: 'store',
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        }],
+    });
+
+    renderPass.setPipeline(dkCopyPipeline);
+    renderPass.setBindGroup(0, bindGroup);
+    renderPass.draw(3);
+    renderPass.end();
+}
+
+function blurDualKawase(commandEncoder, input, output) {
+    // Dual Kawase is isotropic, so blur based on max(x,y)
+    const radius = Math.max(blurParams.radiusX, blurParams.radiusY);
+
+    // Amount of Kawase "steps" to do; this more or less matches the blur amount of Gaussian
+    const numSteps = radius / 3.0;
+    if (numSteps <= 0.0) {
+        kawaseCopy(commandEncoder, input, output);
+        return;
+    }
+
+    const fullSizeX = currentImageSize.width;
+    const fullSizeY = currentImageSize.height;
+
+    let curr = input;
+    const texturesToCleanup = [];
+
+    // Downsample
+    let lastPass = 0;
+    for (let i = 2; i <= numSteps; i *= 2) {
+        const tmp = kawaseDownsample(commandEncoder, curr, fullSizeX, fullSizeY, i, 1.0);
+        if (curr !== input) {
+            texturesToCleanup.push(curr);
+        }
+        curr = tmp;
+        lastPass = i;
+    }
+
+    let residual = numSteps - lastPass;
+    if (residual > 0.0) {
+        let nextPass = Math.max(lastPass, 1) * 2;
+        let ratio = residual / (nextPass - lastPass);
+        lastPass = Math.max(lastPass, 1);
+
+        // Downsample and upsample one more step
+        const extraDown = kawaseDownsample(commandEncoder, curr, fullSizeX, fullSizeY, nextPass, 0.5 + 0.5 * ratio);
+        const extraUp = kawaseUpsample(commandEncoder, extraDown, fullSizeX, fullSizeY, lastPass, 0.5 + 0.5 * ratio);
+        texturesToCleanup.push(extraDown);
+
+        // Mix current with that extra step based on ratio
+        kawaseMix(commandEncoder, curr, extraUp, 1.0 - ratio);
+        if (curr !== input) {
+            texturesToCleanup.push(curr);
+        }
+        curr = extraUp;
+
+        // If there will be no further upsamples, copy to output
+        if (lastPass < 2) {
+            kawaseCopy(commandEncoder, curr, output);
+            texturesToCleanup.push(curr);
+            // Schedule cleanup after GPU work completes
+            device.queue.onSubmittedWorkDone().then(() => {
+                texturesToCleanup.forEach(t => t.destroy());
+            });
+            return;
+        }
+    }
+
+    // Upsample
+    for (let i = Math.floor(lastPass / 2); i >= 1; i = Math.floor(i / 2)) {
+        const isLast = i === 1;
+        const tmp = kawaseUpsample(commandEncoder, curr, fullSizeX, fullSizeY, i, 1.0, isLast ? output : null);
+        if (curr !== input) {
+            texturesToCleanup.push(curr);
+        }
+        curr = tmp;
+    }
+
+    // Schedule cleanup after GPU work completes
+    device.queue.onSubmittedWorkDone().then(() => {
+        texturesToCleanup.forEach(t => t.destroy());
+    });
+}
+
+// ============================================================================
 // Canvas Sizing
 // ============================================================================
 
@@ -690,18 +1071,25 @@ function render() {
 
     // Apply blur if radius > 0
     if (blurParams.radiusX > 0 || blurParams.radiusY > 0) {
-        // Horizontal pass: input -> temp
-        if (blurParams.radiusX > 0) {
-            separablePass(commandEncoder, imageTexture, blurTempTexture, blurParams.mode, true, blurParams.radiusX);
-        }
-
-        // Vertical pass: temp -> output (or input -> output if no horizontal)
-        if (blurParams.radiusY > 0) {
-            const vertInput = blurParams.radiusX > 0 ? blurTempTexture : imageTexture;
-            separablePass(commandEncoder, vertInput, blurOutputTexture, blurParams.mode, false, blurParams.radiusY);
+        if (blurParams.mode === BlurMode.DUAL_KAWASE) {
+            // Dual Kawase blur
+            blurDualKawase(commandEncoder, imageTexture, blurOutputTexture);
             textureToDisplay = blurOutputTexture;
         } else {
-            textureToDisplay = blurTempTexture;
+            // Separable blur (Box, Tent, Gaussian)
+            // Horizontal pass: input -> temp
+            if (blurParams.radiusX > 0) {
+                separablePass(commandEncoder, imageTexture, blurTempTexture, blurParams.mode, true, blurParams.radiusX);
+            }
+
+            // Vertical pass: temp -> output (or input -> output if no horizontal)
+            if (blurParams.radiusY > 0) {
+                const vertInput = blurParams.radiusX > 0 ? blurTempTexture : imageTexture;
+                separablePass(commandEncoder, vertInput, blurOutputTexture, blurParams.mode, false, blurParams.radiusY);
+                textureToDisplay = blurOutputTexture;
+            } else {
+                textureToDisplay = blurTempTexture;
+            }
         }
     }
 
