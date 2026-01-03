@@ -29,6 +29,7 @@ add_executable (blur_playground
     src/texture.h
     readme.md
     shaders/blur.glsl
+    shaders/calc_err.glsl
     shaders/display_tex.glsl
     lib/imgui/imgui.cpp
     lib/imgui/imgui_draw.cpp
@@ -40,6 +41,7 @@ add_executable (blur_playground
 
 set(SHADER_FILES
     shaders/blur.glsl
+    shaders/calc_err.glsl
     shaders/display_tex.glsl
 )
 foreach(shader ${SHADER_FILES})
