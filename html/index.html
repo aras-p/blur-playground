@@ -158,7 +158,8 @@
 // WGSL Shaders
 // ============================================================================
 
-const PASSTHROUGH_SHADER = `
+// Shared fullscreen triangle vertex shader
+const FULLSCREEN_VERTEX_SHADER = `
 struct VertexOutput {
     @builtin(position) position: vec4f,
     @location(0) uv: vec2f,
@@ -166,7 +167,7 @@ struct VertexOutput {
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
-    // Full-screen triangle
+    // Full-screen triangle (3 vertices, no vertex buffer needed)
     var pos = array<vec2f, 3>(
         vec2f(-1.0, -1.0),
         vec2f( 3.0, -1.0),
@@ -183,7 +184,9 @@ fn vs_main(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
     output.uv = uv[vertexIndex];
     return output;
 }
+`;
 
+const PASSTHROUGH_SHADER = FULLSCREEN_VERTEX_SHADER + `
 @group(0) @binding(0) var texSampler: sampler;
 @group(0) @binding(1) var tex: texture_2d<f32>;
 
@@ -203,32 +206,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 }
 `;
 
-const SEPARABLE_BLUR_SHADER = `
-struct VertexOutput {
-    @builtin(position) position: vec4f,
-    @location(0) uv: vec2f,
-}
-
-@vertex
-fn vs_main(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
-    // Full-screen triangle
-    var pos = array<vec2f, 3>(
-        vec2f(-1.0, -1.0),
-        vec2f( 3.0, -1.0),
-        vec2f(-1.0,  3.0)
-    );
-    var uv = array<vec2f, 3>(
-        vec2f(0.0, 1.0),
-        vec2f(2.0, 1.0),
-        vec2f(0.0, -1.0)
-    );
-
-    var output: VertexOutput;
-    output.position = vec4f(pos[vertexIndex], 0.0, 1.0);
-    output.uv = uv[vertexIndex];
-    return output;
-}
-
+const SEPARABLE_BLUR_SHADER = FULLSCREEN_VERTEX_SHADER + `
 struct BlurParams {
     uvStep: vec2f,
     kernelWidth: i32,
@@ -255,34 +233,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 }
 `;
 
-// Shared vertex shader for Dual Kawase (used by all DK shaders)
-const DK_VERTEX_SHADER = `
-struct VertexOutput {
-    @builtin(position) position: vec4f,
-    @location(0) uv: vec2f,
-}
-
-@vertex
-fn vs_main(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
-    var pos = array<vec2f, 3>(
-        vec2f(-1.0, -1.0),
-        vec2f( 3.0, -1.0),
-        vec2f(-1.0,  3.0)
-    );
-    var uv = array<vec2f, 3>(
-        vec2f(0.0, 1.0),
-        vec2f(2.0, 1.0),
-        vec2f(0.0, -1.0)
-    );
-
-    var output: VertexOutput;
-    output.position = vec4f(pos[vertexIndex], 0.0, 1.0);
-    output.uv = uv[vertexIndex];
-    return output;
-}
-`;
-
-const DK_DOWNSAMPLE_SHADER = DK_VERTEX_SHADER + `
+const DK_DOWNSAMPLE_SHADER = FULLSCREEN_VERTEX_SHADER + `
 struct Params {
     uvStep: vec2f,
 }
@@ -303,7 +254,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 }
 `;
 
-const DK_UPSAMPLE_SHADER = DK_VERTEX_SHADER + `
+const DK_UPSAMPLE_SHADER = FULLSCREEN_VERTEX_SHADER + `
 struct Params {
     uvStep: vec2f,
 }
@@ -327,7 +278,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 }
 `;
 
-const DK_MIX_SHADER = DK_VERTEX_SHADER + `
+const DK_MIX_SHADER = FULLSCREEN_VERTEX_SHADER + `
 struct Params {
     ratio: f32,
 }
@@ -343,7 +294,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 }
 `;
 
-const SPLIT_KAWASE_STEP_SHADER = DK_VERTEX_SHADER + `
+const SPLIT_KAWASE_STEP_SHADER = FULLSCREEN_VERTEX_SHADER + `
 struct Params {
     uvStep: vec2f,
     w00: f32,
