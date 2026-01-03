@@ -408,6 +408,11 @@ let blurOutputTexture = null;
 let bindGroup = null;
 let currentImageSize = { width: 0, height: 0 };
 
+// Reusable resources for Kawase blurs
+let kawaseUniformBuffers = [];  // Pool of uniform buffers
+let kawaseUniformBufferIndex = 0;
+let kawaseTextureCache = new Map();  // Cache textures by "width,height" key
+
 // ============================================================================
 // Blur Parameters
 // ============================================================================
@@ -652,6 +657,9 @@ function createTextureFromLinearData(linearData) {
         imageTexture.destroy();
     }
 
+    // Clear cached textures (pyramid sizes depend on image size)
+    clearTextureCache();
+
     imageTexture = device.createTexture({
         size: [width, height],
         format: 'rgba32float',
@@ -864,20 +872,73 @@ function createDKTexture(width, height) {
     });
 }
 
+// Get a uniform buffer from pool (creates if needed)
+function getKawaseUniformBuffer(size) {
+    if (kawaseUniformBufferIndex >= kawaseUniformBuffers.length) {
+        kawaseUniformBuffers.push(device.createBuffer({
+            size: 32,  // Max size needed (Split Kawase params)
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        }));
+    }
+    return kawaseUniformBuffers[kawaseUniformBufferIndex++];
+}
+
+// Reset uniform buffer pool index at start of frame
+function resetKawaseUniformBufferPool() {
+    kawaseUniformBufferIndex = 0;
+}
+
+// Get a cached texture of given size (creates if not exists)
+function getCachedTexture(width, height) {
+    const key = `${width},${height}`;
+    let textures = kawaseTextureCache.get(key);
+    if (!textures) {
+        textures = [];
+        kawaseTextureCache.set(key, textures);
+    }
+    // Find an unused texture or create new one
+    for (const entry of textures) {
+        if (!entry.inUse) {
+            entry.inUse = true;
+            return entry.texture;
+        }
+    }
+    // Create new texture
+    const texture = createDKTexture(width, height);
+    textures.push({ texture, inUse: true });
+    return texture;
+}
+
+// Mark all cached textures as unused (call at start of frame)
+function resetTextureCache() {
+    for (const textures of kawaseTextureCache.values()) {
+        for (const entry of textures) {
+            entry.inUse = false;
+        }
+    }
+}
+
+// Clear texture cache (call when image size changes)
+function clearTextureCache() {
+    for (const textures of kawaseTextureCache.values()) {
+        for (const entry of textures) {
+            entry.texture.destroy();
+        }
+    }
+    kawaseTextureCache.clear();
+}
+
 function kawaseDownsample(commandEncoder, input, fullSizeX, fullSizeY, divisor, ratio) {
     const sizeX = Math.max(Math.floor(fullSizeX / divisor), 1);
     const sizeY = Math.max(Math.floor(fullSizeY / divisor), 1);
-    const output = createDKTexture(sizeX, sizeY);
+    const output = getCachedTexture(sizeX, sizeY);
 
     // Note: "step" is based on *output* size, which is 2x smaller than input
     const stepX = ratio / sizeX;
     const stepY = ratio / sizeY;
 
     const paramsData = new Float32Array([stepX, stepY]);
-    const paramsBuffer = device.createBuffer({
-        size: 8,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
+    const paramsBuffer = getKawaseUniformBuffer();
     device.queue.writeBuffer(paramsBuffer, 0, paramsData);
 
     const bindGroup = device.createBindGroup({
@@ -909,17 +970,14 @@ function kawaseDownsample(commandEncoder, input, fullSizeX, fullSizeY, divisor, 
 function kawaseUpsample(commandEncoder, input, fullSizeX, fullSizeY, divisor, ratio, existingOutput = null) {
     const sizeX = Math.max(Math.floor(fullSizeX / divisor), 1);
     const sizeY = Math.max(Math.floor(fullSizeY / divisor), 1);
-    const output = existingOutput || createDKTexture(sizeX, sizeY);
+    const output = existingOutput || getCachedTexture(sizeX, sizeY);
 
     // Note: "step" is based on *input* size, which is 2x smaller than output
     const stepX = ratio / input.width;
     const stepY = ratio / input.height;
 
     const paramsData = new Float32Array([stepX, stepY]);
-    const paramsBuffer = device.createBuffer({
-        size: 8,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
+    const paramsBuffer = getKawaseUniformBuffer();
     device.queue.writeBuffer(paramsBuffer, 0, paramsData);
 
     const bindGroup = device.createBindGroup({
@@ -950,10 +1008,7 @@ function kawaseUpsample(commandEncoder, input, fullSizeX, fullSizeY, divisor, ra
 
 function kawaseMix(commandEncoder, input, output, ratio) {
     const paramsData = new Float32Array([ratio]);
-    const paramsBuffer = device.createBuffer({
-        size: 4,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
+    const paramsBuffer = getKawaseUniformBuffer();
     device.queue.writeBuffer(paramsBuffer, 0, paramsData);
 
     const bindGroup = device.createBindGroup({
@@ -1018,16 +1073,11 @@ function blurDualKawase(commandEncoder, input, output) {
     const fullSizeY = currentImageSize.height;
 
     let curr = input;
-    const texturesToCleanup = [];
 
     // Downsample
     let lastPass = 0;
     for (let i = 2; i <= numSteps; i *= 2) {
-        const tmp = kawaseDownsample(commandEncoder, curr, fullSizeX, fullSizeY, i, 1.0);
-        if (curr !== input) {
-            texturesToCleanup.push(curr);
-        }
-        curr = tmp;
+        curr = kawaseDownsample(commandEncoder, curr, fullSizeX, fullSizeY, i, 1.0);
         lastPass = i;
     }
 
@@ -1040,23 +1090,14 @@ function blurDualKawase(commandEncoder, input, output) {
         // Downsample and upsample one more step
         const extraDown = kawaseDownsample(commandEncoder, curr, fullSizeX, fullSizeY, nextPass, 0.5 + 0.5 * ratio);
         const extraUp = kawaseUpsample(commandEncoder, extraDown, fullSizeX, fullSizeY, lastPass, 0.5 + 0.5 * ratio);
-        texturesToCleanup.push(extraDown);
 
         // Mix current with that extra step based on ratio
         kawaseMix(commandEncoder, curr, extraUp, 1.0 - ratio);
-        if (curr !== input) {
-            texturesToCleanup.push(curr);
-        }
         curr = extraUp;
 
         // If there will be no further upsamples, copy to output
         if (lastPass < 2) {
             kawaseCopy(commandEncoder, curr, output);
-            texturesToCleanup.push(curr);
-            // Schedule cleanup after GPU work completes
-            device.queue.onSubmittedWorkDone().then(() => {
-                texturesToCleanup.forEach(t => t.destroy());
-            });
             return;
         }
     }
@@ -1064,17 +1105,8 @@ function blurDualKawase(commandEncoder, input, output) {
     // Upsample
     for (let i = Math.floor(lastPass / 2); i >= 1; i = Math.floor(i / 2)) {
         const isLast = i === 1;
-        const tmp = kawaseUpsample(commandEncoder, curr, fullSizeX, fullSizeY, i, 1.0, isLast ? output : null);
-        if (curr !== input) {
-            texturesToCleanup.push(curr);
-        }
-        curr = tmp;
+        curr = kawaseUpsample(commandEncoder, curr, fullSizeX, fullSizeY, i, 1.0, isLast ? output : null);
     }
-
-    // Schedule cleanup after GPU work completes
-    device.queue.onSubmittedWorkDone().then(() => {
-        texturesToCleanup.forEach(t => t.destroy());
-    });
 }
 
 // ============================================================================
@@ -1084,7 +1116,7 @@ function blurDualKawase(commandEncoder, input, output) {
 function splitKawaseStep(commandEncoder, cfg, input, fullSizeX, fullSizeY, divisor, horizontal) {
     const sizeX = horizontal ? Math.max(Math.floor(fullSizeX / divisor), 1) : fullSizeX;
     const sizeY = horizontal ? fullSizeY : Math.max(Math.floor(fullSizeY / divisor), 1);
-    const output = createDKTexture(sizeX, sizeY);
+    const output = getCachedTexture(sizeX, sizeY);
 
     // X or Y component is set to zero based on whether we are doing horizontal or vertical pass
     const stepX = horizontal ? 1.0 / input.width : 0.0;
@@ -1092,10 +1124,7 @@ function splitKawaseStep(commandEncoder, cfg, input, fullSizeX, fullSizeY, divis
 
     // Params: uvStep (vec2f = 8 bytes) + w00, w05, w10, w15, w20 (5 * f32 = 20 bytes) = 28 bytes, padded to 32
     const paramsData = new Float32Array([stepX, stepY, cfg.w00, cfg.w05, cfg.w10, cfg.w15, cfg.w20, 0.0]);
-    const paramsBuffer = device.createBuffer({
-        size: 32,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
+    const paramsBuffer = getKawaseUniformBuffer();
     device.queue.writeBuffer(paramsBuffer, 0, paramsData);
 
     const bindGroup = device.createBindGroup({
@@ -1124,7 +1153,7 @@ function splitKawaseStep(commandEncoder, cfg, input, fullSizeX, fullSizeY, divis
     return output;
 }
 
-function splitKawaseAxis(commandEncoder, cfgDown, cfgUp, input, output, radius, horizontal, texturesToCleanup) {
+function splitKawaseAxis(commandEncoder, cfgDown, cfgUp, input, output, radius, horizontal) {
     // Amount of Kawase "steps" to do; this more or less matches the blur amount of Gaussian
     const numSteps = radius / 3.0;
 
@@ -1136,11 +1165,7 @@ function splitKawaseAxis(commandEncoder, cfgDown, cfgUp, input, output, radius, 
     // Downsample
     let lastPass = 0;
     for (let i = 2; i <= numSteps; i *= 2) {
-        const tmp = splitKawaseStep(commandEncoder, cfgDown, curr, fullSizeX, fullSizeY, i, horizontal);
-        if (curr !== input) {
-            texturesToCleanup.push(curr);
-        }
-        curr = tmp;
+        curr = splitKawaseStep(commandEncoder, cfgDown, curr, fullSizeX, fullSizeY, i, horizontal);
         lastPass = i;
     }
 
@@ -1153,52 +1178,32 @@ function splitKawaseAxis(commandEncoder, cfgDown, cfgUp, input, output, radius, 
         // Downsample and upsample one more step
         const extraDown = splitKawaseStep(commandEncoder, cfgDown, curr, fullSizeX, fullSizeY, nextPass, horizontal);
         const extraUp = splitKawaseStep(commandEncoder, cfgUp, extraDown, fullSizeX, fullSizeY, lastPass, horizontal);
-        texturesToCleanup.push(extraDown);
 
         // Mix current with that extra step based on ratio
         kawaseMix(commandEncoder, curr, extraUp, 1.0 - ratio);
-        if (curr !== input) {
-            texturesToCleanup.push(curr);
-        }
         curr = extraUp;
     }
 
     // Upsample
     for (let i = Math.floor(lastPass / 2); i >= 1; i = Math.floor(i / 2)) {
-        const tmp = splitKawaseStep(commandEncoder, cfgUp, curr, fullSizeX, fullSizeY, i, horizontal);
-        if (curr !== input) {
-            texturesToCleanup.push(curr);
-        }
-        curr = tmp;
+        curr = splitKawaseStep(commandEncoder, cfgUp, curr, fullSizeX, fullSizeY, i, horizontal);
     }
 
     // Copy to output
     kawaseCopy(commandEncoder, curr, output);
-    if (curr !== input) {
-        texturesToCleanup.push(curr);
-    }
 }
 
 function blurSplitKawase(commandEncoder, input, output) {
-    const texturesToCleanup = [];
-
-    // Create temp texture for intermediate result between X and Y passes
-    const tmp = createDKTexture(currentImageSize.width, currentImageSize.height);
+    // Get temp texture for intermediate result between X and Y passes
+    const tmp = getCachedTexture(currentImageSize.width, currentImageSize.height);
 
     // Horizontal pass: input -> tmp
     splitKawaseAxis(commandEncoder, blurParams.splitCfgDown, blurParams.splitCfgUp,
-        input, tmp, blurParams.radiusX, true, texturesToCleanup);
+        input, tmp, blurParams.radiusX, true);
 
     // Vertical pass: tmp -> output
     splitKawaseAxis(commandEncoder, blurParams.splitCfgDown, blurParams.splitCfgUp,
-        tmp, output, blurParams.radiusY, false, texturesToCleanup);
-
-    texturesToCleanup.push(tmp);
-
-    // Schedule cleanup after GPU work completes
-    device.queue.onSubmittedWorkDone().then(() => {
-        texturesToCleanup.forEach(t => t.destroy());
-    });
+        tmp, output, blurParams.radiusY, false);
 }
 
 // ============================================================================
@@ -1235,6 +1240,10 @@ function render() {
 
     // Ensure blur textures exist
     ensureBlurTextures(width, height);
+
+    // Reset resource pools for this frame
+    resetKawaseUniformBufferPool();
+    resetTextureCache();
 
     const commandEncoder = device.createCommandEncoder();
 
