@@ -110,9 +110,13 @@ void main() { frag_color = texture(sampler2D(tex, smp), uv); }
 
 // ======== Split Kawase
 
-#pragma sokol @fs fs_sk_down
+#pragma sokol @fs fs_split_kawase_step
 in vec2 uv;
-layout(binding = 0) uniform fs_sk_down_params { vec2 uv_step; };
+layout(binding = 0) uniform fs_split_kawase_step_params
+{
+    vec2 uv_step;
+    float w00, w05, w10, w15, w20;
+};
 layout(binding = 0) uniform texture2D tex;
 layout(binding = 0) uniform sampler smp;
 out vec4 frag_color;
@@ -120,41 +124,17 @@ out vec4 frag_color;
 void main()
 {
     vec4 col = vec4(0.0);
-    vec2 st = uv_step * 0.5; //@TODO: move to uniforms
-    col += texture(sampler2D(tex, smp), uv) * 2.12;
-    col += texture(sampler2D(tex, smp), uv + st * (-0.5)) * 0.75;
-    col += texture(sampler2D(tex, smp), uv + st * (+0.5)) * 0.75;
-    col += texture(sampler2D(tex, smp), uv + st * (-1.0)) * 1.30;
-    col += texture(sampler2D(tex, smp), uv + st * (+1.0)) * 1.30;
-    col += texture(sampler2D(tex, smp), uv + st * (-1.5)) * 0.10;
-    col += texture(sampler2D(tex, smp), uv + st * (+1.5)) * 0.10;
-    col += texture(sampler2D(tex, smp), uv + st * (-2.0)) * 0.15;
-    col += texture(sampler2D(tex, smp), uv + st * (+2.0)) * 0.15;
-    frag_color = col * (1.0f / (2.12 + (0.75 + 1.30 + 0.10 + 0.15) * 2.0));
-}
-#pragma sokol @end
-
-#pragma sokol @fs fs_sk_up
-in vec2 uv;
-layout(binding = 0) uniform fs_sk_up_params { vec2 uv_step; };
-layout(binding = 0) uniform texture2D tex;
-layout(binding = 0) uniform sampler smp;
-out vec4 frag_color;
-
-void main()
-{
-    vec4 col = vec4(0.0);
-    vec2 st = uv_step; //@TODO: cleanup
-    col += texture(sampler2D(tex, smp), uv) * 0.0;
-    col += texture(sampler2D(tex, smp), uv + st * (-0.5)) * 2.80;
-    col += texture(sampler2D(tex, smp), uv + st * (+0.5)) * 2.80;
-    col += texture(sampler2D(tex, smp), uv + st * (-1.0)) * 0.70;
-    col += texture(sampler2D(tex, smp), uv + st * (+1.0)) * 0.70;
-    col += texture(sampler2D(tex, smp), uv + st * (-1.5)) * 0.00;
-    col += texture(sampler2D(tex, smp), uv + st * (+1.5)) * 0.00;
-    col += texture(sampler2D(tex, smp), uv + st * (-2.0)) * 0.01;
-    col += texture(sampler2D(tex, smp), uv + st * (+2.0)) * 0.01;
-    frag_color = col * (1.0f / (0.0 + (2.80 + 0.70 + 0.00 + 0.01) * 2.0));
+    vec2 st = uv_step;
+    col += texture(sampler2D(tex, smp), uv) * w00;
+    col += texture(sampler2D(tex, smp), uv + st * (-0.5)) * w05;
+    col += texture(sampler2D(tex, smp), uv + st * (+0.5)) * w05;
+    col += texture(sampler2D(tex, smp), uv + st * (-1.0)) * w10;
+    col += texture(sampler2D(tex, smp), uv + st * (+1.0)) * w10;
+    col += texture(sampler2D(tex, smp), uv + st * (-1.5)) * w15;
+    col += texture(sampler2D(tex, smp), uv + st * (+1.5)) * w15;
+    col += texture(sampler2D(tex, smp), uv + st * (-2.0)) * w20;
+    col += texture(sampler2D(tex, smp), uv + st * (+2.0)) * w20;
+    frag_color = col * (1.0f / (w00 + (w05 + w10 + w15 + w20) * 2.0));
 }
 #pragma sokol @end
 
@@ -163,5 +143,4 @@ void main()
 #pragma sokol @program blur_dk_up vs_blur fs_dk_up
 #pragma sokol @program blur_dk_mix vs_blur fs_dk_mix
 #pragma sokol @program blur_dk_copy vs_blur fs_dk_copy
-#pragma sokol @program blur_sk_down vs_blur fs_sk_down
-#pragma sokol @program blur_sk_up vs_blur fs_sk_up
+#pragma sokol @program blur_split_kawase_step vs_blur fs_split_kawase_step
