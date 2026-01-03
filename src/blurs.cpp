@@ -376,18 +376,18 @@ static void blur_dual_kawase(BlurContext *ctx, Texture *input, Texture *output, 
     }
 }
 
-// ======== Dual Kawase blur
+// ======== Split Kawase blur
 
 static Texture *split_kawase_downsample(
-    BlurContext *ctx, const Texture &input, int full_size_x, int full_size_y, int divisor, bool horizontal, float ratio)
+    BlurContext *ctx, const Texture &input, int full_size_x, int full_size_y, int divisor, bool horizontal)
 {
     int size_x = horizontal ? std::max(full_size_x / divisor, 1) : full_size_x;
     int size_y = horizontal ? full_size_y : std::max(full_size_y / divisor, 1);
     Texture *output = new Texture(size_x, size_y, "split_kawase_down");
     // Note: "step" is based on *output* size, which is 2x smaller than input.
     // X or Y component is set to zero based on whether we are doing horizontal or vertical pass.
-    float step_x = horizontal ? ratio / size_x : 0.0f;
-    float step_y = horizontal ? 0.0f : ratio / size_y;
+    float step_x = horizontal ? 1.0f / size_x : 0.0f;
+    float step_y = horizontal ? 0.0f : 1.0f / size_y;
 
     const fs_sk_down_params_t par = {
         .uv_step[0] = step_x,
@@ -408,17 +408,16 @@ static Texture *split_kawase_downsample(
     return output;
 }
 
-static Texture *split_kawase_upsample(BlurContext *ctx, const Texture &input, int full_size_x, int full_size_y,
-    int divisor, bool horizontal, float ratio, Texture *output)
+static Texture *split_kawase_upsample(
+    BlurContext *ctx, const Texture &input, int full_size_x, int full_size_y, int divisor, bool horizontal)
 {
     int size_x = horizontal ? std::max(full_size_x / divisor, 1) : full_size_x;
     int size_y = horizontal ? full_size_y : std::max(full_size_y / divisor, 1);
-    if (output == nullptr)
-        output = new Texture(size_x, size_y, "split_kawase_up");
+    Texture *output = new Texture(size_x, size_y, "split_kawase_up");
     // Note: "step" is based on *input* size, which is 2x smaller than output
     // X or Y component is set to zero based on whether we are doing horizontal or vertical pass.
-    float step_x = horizontal ? ratio / input.width : 0.0f;
-    float step_y = horizontal ? 0.0f : ratio / input.height;
+    float step_x = horizontal ? 1.0f / input.width : 0.0f;
+    float step_y = horizontal ? 0.0f : 1.0f / input.height;
 
     const fs_sk_up_params_t par = {
         .uv_step[0] = step_x,
@@ -443,11 +442,6 @@ static void split_kawase_axis(BlurContext *ctx, Texture *input, Texture *output,
 {
     // Amount of Kawase "steps" to do; this more or less matches the blur amount of Gaussian.
     float num_steps = radius / 3.0f;
-    if (num_steps <= 0.0f)
-    {
-        kawase_copy(ctx, *input, *output);
-        return;
-    }
 
     const int full_size_x = input->width;
     const int full_size_y = input->height;
@@ -458,7 +452,7 @@ static void split_kawase_axis(BlurContext *ctx, Texture *input, Texture *output,
     int last_pass = 0;
     for (int i = 2; i <= num_steps; i *= 2)
     {
-        Texture *tmp = split_kawase_downsample(ctx, *curr, full_size_x, full_size_y, i, horizontal, 1.0f);
+        Texture *tmp = split_kawase_downsample(ctx, *curr, full_size_x, full_size_y, i, horizontal);
         if (curr != input)
             delete curr;
         curr = tmp;
@@ -473,10 +467,8 @@ static void split_kawase_axis(BlurContext *ctx, Texture *input, Texture *output,
         last_pass = std::max(last_pass, 1);
 
         // Downsample and upsample one more step
-        Texture *extra_down =
-            split_kawase_downsample(ctx, *curr, full_size_x, full_size_y, next_pass, horizontal, 1.0f);
-        Texture *extra_up =
-            split_kawase_upsample(ctx, *extra_down, full_size_x, full_size_y, last_pass, horizontal, 1.0f, nullptr);
+        Texture *extra_down = split_kawase_downsample(ctx, *curr, full_size_x, full_size_y, next_pass, horizontal);
+        Texture *extra_up = split_kawase_upsample(ctx, *extra_down, full_size_x, full_size_y, last_pass, horizontal);
         delete extra_down;
 
         // Mix current with that extra step based on ratio
@@ -484,25 +476,21 @@ static void split_kawase_axis(BlurContext *ctx, Texture *input, Texture *output,
         if (curr != input)
             delete curr;
         curr = extra_up;
-
-        // If there will be no further upsamples, copy to output.
-        if (last_pass < 2)
-        {
-            kawase_copy(ctx, *curr, *output);
-            delete curr;
-        }
     }
 
     // Upsample.
     for (int i = last_pass / 2; i >= 1; i /= 2)
     {
         bool is_last = i == 1;
-        Texture *tmp = split_kawase_upsample(
-            ctx, *curr, full_size_x, full_size_y, i, horizontal, 1.0f, is_last ? output : nullptr);
+        Texture *tmp = split_kawase_upsample(ctx, *curr, full_size_x, full_size_y, i, horizontal);
         if (curr != input)
             delete curr;
         curr = tmp;
     }
+
+    kawase_copy(ctx, *curr, *output);
+    if (curr != input)
+        delete curr;
 }
 
 static void blur_split_kawase(BlurContext *ctx, Texture *input, Texture *output, const BlurParams &params)
