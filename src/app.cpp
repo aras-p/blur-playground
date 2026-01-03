@@ -34,12 +34,10 @@ static struct
     } smp;
     struct
     {
-        int blur_mode = BLUR_GAUSSIAN;
+        BlurParams blur;
         bool show_original = false;
         bool log_slider = true;
-        int blur_x = 20.0f;
-        int blur_y = 20.0f;
-        bool lock_xy = true;
+        bool lock_xy = false;
         std::vector<std::string> image_files;
         int selected_file_index = -1;
         std::string dragged_file_name;
@@ -53,8 +51,7 @@ static struct
         double result_time = 0.0;
         bool has_result = false;
         std::vector<int> values;
-        int prev_blur_x = 0;
-        int prev_blur_y = 0;
+        BlurParams prev_blur;
         bool prev_lock_xy = false;
     } bench;
 } state;
@@ -186,8 +183,7 @@ static void benchmark_start()
         return;
 
     benchmark_generate_values();
-    state.bench.prev_blur_x = state.ui.blur_x;
-    state.bench.prev_blur_y = state.ui.blur_y;
+    state.bench.prev_blur = state.ui.blur;
     state.bench.prev_lock_xy = state.ui.lock_xy;
     state.bench.running = true;
     state.bench.current_index = 0;
@@ -203,8 +199,7 @@ static void benchmark_stop()
     state.bench.result_time = stm_sec(stm_now()) - state.bench.start_time;
     state.bench.has_result = true;
     // Restore blur to previous values
-    state.ui.blur_x = state.bench.prev_blur_x;
-    state.ui.blur_y = state.bench.prev_blur_y;
+    state.ui.blur = state.bench.prev_blur;
     state.ui.lock_xy = state.bench.prev_lock_xy;
     update_blur();
 }
@@ -224,11 +219,11 @@ static void benchmark_run_step()
         int yi = idx / n;
         int blur_x = state.bench.values[xi];
         int blur_y = state.bench.values[yi];
-        state.ui.blur_x = blur_x;
-        state.ui.blur_y = blur_y;
+        state.ui.blur.radius_x = blur_x;
+        state.ui.blur.radius_y = blur_y;
         state.ui.lock_xy = false;
 
-        blur_calc(state.blur_ctx, state.tex_source, state.tex_blurred, BlurMode(state.ui.blur_mode), blur_x, blur_y);
+        blur_calc(state.blur_ctx, state.tex_source, state.tex_blurred, state.ui.blur);
 
         state.bench.current_index++;
     }
@@ -274,11 +269,7 @@ static void frame()
     sg_commit();
 }
 
-static void update_blur()
-{
-    blur_calc(state.blur_ctx, state.tex_source, state.tex_blurred, BlurMode(state.ui.blur_mode), state.ui.blur_x,
-        state.ui.blur_y);
-}
+static void update_blur() { blur_calc(state.blur_ctx, state.tex_source, state.tex_blurred, state.ui.blur); }
 
 static const char *get_filename_part(const char *path)
 {
@@ -421,23 +412,23 @@ static void ui_draw()
 
         bool changed = false;
 
-        changed |= ImGui::RadioButton("Box", &state.ui.blur_mode, BLUR_BOX);
-        changed |= ImGui::RadioButton("Tent", &state.ui.blur_mode, BLUR_TENT);
-        changed |= ImGui::RadioButton("Gaussian", &state.ui.blur_mode, BLUR_GAUSSIAN);
-        changed |= ImGui::RadioButton("Dual Kawase", &state.ui.blur_mode, BLUR_DUAL_KAWASE);
+        changed |= ImGui::RadioButton("Box", (int *)&state.ui.blur.mode, BLUR_BOX);
+        changed |= ImGui::RadioButton("Tent", (int *)&state.ui.blur.mode, BLUR_TENT);
+        changed |= ImGui::RadioButton("Gaussian", (int *)&state.ui.blur.mode, BLUR_GAUSSIAN);
+        changed |= ImGui::RadioButton("Dual Kawase", (int *)&state.ui.blur.mode, BLUR_DUAL_KAWASE);
 
-        changed |= ImGui::SliderInt(
-            "Blur X", &state.ui.blur_x, 0, 2000, nullptr, state.ui.log_slider ? ImGuiSliderFlags_Logarithmic : 0);
+        changed |= ImGui::SliderInt("Blur X", &state.ui.blur.radius_x, 0, 2000, nullptr,
+            state.ui.log_slider ? ImGuiSliderFlags_Logarithmic : 0);
         ImGui::BeginDisabled(state.ui.lock_xy);
-        changed |= ImGui::SliderInt(
-            "Blur Y", &state.ui.blur_y, 0, 2000, nullptr, state.ui.log_slider ? ImGuiSliderFlags_Logarithmic : 0);
+        changed |= ImGui::SliderInt("Blur Y", &state.ui.blur.radius_y, 0, 2000, nullptr,
+            state.ui.log_slider ? ImGuiSliderFlags_Logarithmic : 0);
         ImGui::EndDisabled();
         changed |= ImGui::Checkbox("Lock X&Y", &state.ui.lock_xy);
         ImGui::Checkbox("Log Sliders", &state.ui.log_slider);
         ImGui::Checkbox("Show Original", &state.ui.show_original);
         if (state.ui.lock_xy)
         {
-            state.ui.blur_y = state.ui.blur_x;
+            state.ui.blur.radius_y = state.ui.blur.radius_x;
         }
 
         if (changed)

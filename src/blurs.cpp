@@ -169,11 +169,11 @@ static void separable_pass(
     delete weights;
 }
 
-void blur_separable(BlurContext *ctx, Texture *input, Texture *output, BlurMode mode, float radius_x, float radius_y)
+void blur_separable(BlurContext *ctx, Texture *input, Texture *output, const BlurParams &params)
 {
     Texture *tmp = new Texture(input->width, input->height, "blur-gauss-tmp");
-    separable_pass(ctx, input, tmp, mode, true, radius_x);
-    separable_pass(ctx, tmp, output, mode, false, radius_y);
+    separable_pass(ctx, input, tmp, params.mode, true, params.radius_x);
+    separable_pass(ctx, tmp, output, params.mode, false, params.radius_y);
     delete tmp;
 }
 
@@ -260,10 +260,10 @@ static Texture *kawase_mix(BlurContext *ctx, const Texture &input1, const Textur
     return output;
 }
 
-void blur_dual_kawase(BlurContext *ctx, Texture *input, Texture *output, float radius_x, float radius_y)
+void blur_dual_kawase(BlurContext *ctx, Texture *input, Texture *output, const BlurParams &params)
 {
     // Dual Kawase is isotropic, so blur based on max(x,y)
-    float radius = std::max(radius_x, radius_y);
+    float radius = std::max(params.radius_x, params.radius_y);
 
     // Amount of Kawase "steps" to do; this more or less matches the blur
     // amount of Gaussian.
@@ -316,10 +316,10 @@ void blur_dual_kawase(BlurContext *ctx, Texture *input, Texture *output, float r
     }
 }
 
-void blur_calc(BlurContext *ctx, Texture *input, Texture *output, BlurMode mode, float radius_x, float radius_y)
+void blur_calc(BlurContext *ctx, Texture *input, Texture *output, const BlurParams &params)
 {
-    if (mode == BLUR_DUAL_KAWASE)
-        blur_dual_kawase(ctx, input, output, radius_x, radius_y);
+    if (params.mode == BLUR_DUAL_KAWASE)
+        blur_dual_kawase(ctx, input, output, params);
     else
-        blur_separable(ctx, input, output, mode, radius_x, radius_y);
+        blur_separable(ctx, input, output, params);
 }
