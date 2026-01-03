@@ -37,7 +37,7 @@ static struct
         BlurParams blur;
         bool show_original = false;
         bool log_slider = true;
-        bool lock_xy = false;
+        bool lock_xy = true;
         std::vector<std::string> image_files;
         int selected_file_index = -1;
         std::string dragged_file_name;
@@ -416,6 +416,7 @@ static void ui_draw()
         changed |= ImGui::RadioButton("Tent", (int *)&state.ui.blur.mode, BLUR_TENT);
         changed |= ImGui::RadioButton("Gaussian", (int *)&state.ui.blur.mode, BLUR_GAUSSIAN);
         changed |= ImGui::RadioButton("Dual Kawase", (int *)&state.ui.blur.mode, BLUR_DUAL_KAWASE);
+        changed |= ImGui::RadioButton("Split Kawase", (int *)&state.ui.blur.mode, BLUR_SPLIT_KAWASE);
 
         changed |= ImGui::SliderInt("Blur X", &state.ui.blur.radius_x, 0, 2000, nullptr,
             state.ui.log_slider ? ImGuiSliderFlags_Logarithmic : 0);
@@ -435,6 +436,9 @@ static void ui_draw()
         {
             update_blur();
         }
+
+        sg_stats stats = sg_query_stats();
+        ImGui::Text("DBG: textures %d", stats.total.images.alive);
 
         ImGui::EndDisabled(); // End benchmark disable
     }

@@ -11,7 +11,8 @@
 struct BlurContext
 {
     sg_pipeline pip_separable;
-    sg_pipeline pip_dk_down, pip_dk_up, pip_dk_mix;
+    sg_pipeline pip_dk_down, pip_dk_up, pip_dk_mix, pip_dk_copy;
+    sg_pipeline pip_sk_down, pip_sk_up;
     sg_sampler smp_linear, smp_nearest;
 
     ~BlurContext()
@@ -20,6 +21,9 @@ struct BlurContext
         sg_destroy_pipeline(pip_dk_down);
         sg_destroy_pipeline(pip_dk_down);
         sg_destroy_pipeline(pip_dk_mix);
+        sg_destroy_pipeline(pip_dk_copy);
+        sg_destroy_pipeline(pip_sk_down);
+        sg_destroy_pipeline(pip_sk_down);
         sg_destroy_sampler(smp_linear);
         sg_destroy_sampler(smp_nearest);
     }
@@ -47,14 +51,44 @@ BlurContext *blur_ctx_initialize()
         .colors[0].pixel_format = SG_PIXELFORMAT_RGBA32F,
         .depth.pixel_format = SG_PIXELFORMAT_NONE,
         .primitive_type = SG_PRIMITIVETYPE_TRIANGLE_STRIP,
-        .label = "pipe-dk-down",
+        .label = "pipe-dk-up",
     });
     ctx->pip_dk_mix = sg_make_pipeline(sg_pipeline_desc{
         .shader = sg_make_shader(blur_dk_mix_shader_desc(sg_query_backend())),
+        .colors[0] = {
+            .pixel_format = SG_PIXELFORMAT_RGBA32F,
+            .blend = {
+                .enabled = true,
+                .src_factor_rgb = SG_BLENDFACTOR_SRC_ALPHA,
+                .dst_factor_rgb = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+                .src_factor_alpha = SG_BLENDFACTOR_SRC_ALPHA,
+                .dst_factor_alpha = SG_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+            },
+        },
+        .depth.pixel_format = SG_PIXELFORMAT_NONE,
+        .primitive_type = SG_PRIMITIVETYPE_TRIANGLE_STRIP,
+        .label = "pipe-dk-mix",
+    });
+    ctx->pip_dk_copy = sg_make_pipeline(sg_pipeline_desc{
+        .shader = sg_make_shader(blur_dk_copy_shader_desc(sg_query_backend())),
         .colors[0].pixel_format = SG_PIXELFORMAT_RGBA32F,
         .depth.pixel_format = SG_PIXELFORMAT_NONE,
         .primitive_type = SG_PRIMITIVETYPE_TRIANGLE_STRIP,
-        .label = "pipe-dk-down",
+        .label = "pipe-dk-copy",
+    });
+    ctx->pip_sk_down = sg_make_pipeline(sg_pipeline_desc{
+        .shader = sg_make_shader(blur_sk_down_shader_desc(sg_query_backend())),
+        .colors[0].pixel_format = SG_PIXELFORMAT_RGBA32F,
+        .depth.pixel_format = SG_PIXELFORMAT_NONE,
+        .primitive_type = SG_PRIMITIVETYPE_TRIANGLE_STRIP,
+        .label = "pipe-sk-down",
+    });
+    ctx->pip_sk_up = sg_make_pipeline(sg_pipeline_desc{
+        .shader = sg_make_shader(blur_sk_up_shader_desc(sg_query_backend())),
+        .colors[0].pixel_format = SG_PIXELFORMAT_RGBA32F,
+        .depth.pixel_format = SG_PIXELFORMAT_NONE,
+        .primitive_type = SG_PRIMITIVETYPE_TRIANGLE_STRIP,
+        .label = "pipe-sk-up",
     });
 
     ctx->smp_linear = sg_make_sampler(sg_sampler_desc{
@@ -169,7 +203,7 @@ static void separable_pass(
     delete weights;
 }
 
-void blur_separable(BlurContext *ctx, Texture *input, Texture *output, const BlurParams &params)
+static void blur_separable(BlurContext *ctx, Texture *input, Texture *output, const BlurParams &params)
 {
     Texture *tmp = new Texture(input->width, input->height, "blur-gauss-tmp");
     separable_pass(ctx, input, tmp, params.mode, true, params.radius_x);
@@ -238,20 +272,18 @@ static Texture *kawase_upsample(
     return output;
 }
 
-static Texture *kawase_mix(BlurContext *ctx, const Texture &input1, const Texture &input2, float ratio)
+static void kawase_mix(BlurContext *ctx, const Texture &input, Texture &output, float ratio)
 {
-    Texture *output = new Texture(input1.width, input1.height, "kawase_mix");
     const fs_dk_mix_params_t par = {
         .ratio = ratio,
     };
-    sg_begin_pass(sg_pass{ .action = { .colors[0] = { .load_action = SG_LOADACTION_DONTCARE } },
+    sg_begin_pass(sg_pass{ .action = { .colors[0] = { .load_action = SG_LOADACTION_LOAD } },
         .attachments = {
-            .colors[0] = output->view_attachment,
+            .colors[0] = output.view_attachment,
         } });
     sg_apply_pipeline(ctx->pip_dk_mix);
     sg_apply_bindings(sg_bindings{
-        .views[VIEW_tex] = input1.view_sample,
-        .views[VIEW_tex2] = input2.view_sample,
+        .views[VIEW_tex] = input.view_sample,
         .samplers[SMP_smp] = ctx->smp_nearest,
     });
     sg_apply_uniforms(UB_fs_dk_mix_params, SG_RANGE(par));
@@ -260,7 +292,23 @@ static Texture *kawase_mix(BlurContext *ctx, const Texture &input1, const Textur
     return output;
 }
 
-void blur_dual_kawase(BlurContext *ctx, Texture *input, Texture *output, const BlurParams &params)
+static void kawase_copy(BlurContext *ctx, const Texture &input, Texture &output)
+{
+    sg_begin_pass(sg_pass{ .action = { .colors[0] = { .load_action = SG_LOADACTION_DONTCARE } },
+        .attachments = {
+            .colors[0] = output.view_attachment,
+        } });
+    sg_apply_pipeline(ctx->pip_dk_copy);
+    sg_apply_bindings(sg_bindings{
+        .views[VIEW_tex] = input.view_sample,
+        .samplers[SMP_smp] = ctx->smp_nearest,
+    });
+    sg_draw(0, 4, 1);
+    sg_end_pass();
+    return output;
+}
+
+static void blur_dual_kawase(BlurContext *ctx, Texture *input, Texture *output, const BlurParams &params)
 {
     // Dual Kawase is isotropic, so blur based on max(x,y)
     float radius = std::max(params.radius_x, params.radius_y);
@@ -268,6 +316,11 @@ void blur_dual_kawase(BlurContext *ctx, Texture *input, Texture *output, const B
     // Amount of Kawase "steps" to do; this more or less matches the blur
     // amount of Gaussian.
     float num_steps = radius / 3.0f;
+    if (num_steps <= 0.0f)
+    {
+        kawase_copy(ctx, *input, *output);
+        return;
+    }
 
     const int full_size_x = input->width;
     const int full_size_y = input->height;
@@ -275,7 +328,7 @@ void blur_dual_kawase(BlurContext *ctx, Texture *input, Texture *output, const B
     Texture *curr = input;
 
     // Downsample
-    int last_pass = 1;
+    int last_pass = 0;
     for (int i = 2; i <= num_steps; i *= 2)
     {
         Texture *tmp = kawase_downsample(ctx, *curr, full_size_x, full_size_y, i, 1.0f);
@@ -288,8 +341,9 @@ void blur_dual_kawase(BlurContext *ctx, Texture *input, Texture *output, const B
     float residual = num_steps - last_pass;
     if (residual > 0.0f)
     {
-        int next_pass = last_pass * 2;
+        int next_pass = std::max(last_pass, 1) * 2;
         float ratio = residual / (next_pass - last_pass);
+        last_pass = std::max(last_pass, 1);
 
         // Downsample and upsample one more step
         Texture *extra_down = kawase_downsample(ctx, *curr, full_size_x, full_size_y, next_pass, 0.5f + 0.5f * ratio);
@@ -298,11 +352,17 @@ void blur_dual_kawase(BlurContext *ctx, Texture *input, Texture *output, const B
         delete extra_down;
 
         // Mix current with that extra step based on ratio
-        Texture *tmp = kawase_mix(ctx, *curr, *extra_up, ratio);
-        delete extra_up;
+        kawase_mix(ctx, *curr, *extra_up, 1.0f - ratio);
         if (curr != input)
             delete curr;
-        curr = tmp;
+        curr = extra_up;
+
+        // If there will be no further upsamples, copy to output.
+        if (last_pass < 2)
+        {
+            kawase_copy(ctx, *curr, *output);
+            delete curr;
+        }
     }
 
     // Upsample.
@@ -316,10 +376,151 @@ void blur_dual_kawase(BlurContext *ctx, Texture *input, Texture *output, const B
     }
 }
 
+// ======== Dual Kawase blur
+
+static Texture *split_kawase_downsample(
+    BlurContext *ctx, const Texture &input, int full_size_x, int full_size_y, int divisor, bool horizontal, float ratio)
+{
+    int size_x = horizontal ? std::max(full_size_x / divisor, 1) : full_size_x;
+    int size_y = horizontal ? full_size_y : std::max(full_size_y / divisor, 1);
+    Texture *output = new Texture(size_x, size_y, "split_kawase_down");
+    // Note: "step" is based on *output* size, which is 2x smaller than input.
+    // X or Y component is set to zero based on whether we are doing horizontal or vertical pass.
+    float step_x = horizontal ? ratio / size_x : 0.0f;
+    float step_y = horizontal ? 0.0f : ratio / size_y;
+
+    const fs_sk_down_params_t par = {
+        .uv_step[0] = step_x,
+        .uv_step[1] = step_y,
+    };
+    sg_begin_pass(sg_pass{ .action = { .colors[0] = { .load_action = SG_LOADACTION_DONTCARE } },
+        .attachments = {
+            .colors[0] = output->view_attachment,
+        } });
+    sg_apply_pipeline(ctx->pip_sk_down);
+    sg_apply_bindings(sg_bindings{
+        .views[VIEW_tex] = input.view_sample,
+        .samplers[SMP_smp] = ctx->smp_linear,
+    });
+    sg_apply_uniforms(UB_fs_sk_down_params, SG_RANGE(par));
+    sg_draw(0, 4, 1);
+    sg_end_pass();
+    return output;
+}
+
+static Texture *split_kawase_upsample(BlurContext *ctx, const Texture &input, int full_size_x, int full_size_y,
+    int divisor, bool horizontal, float ratio, Texture *output)
+{
+    int size_x = horizontal ? std::max(full_size_x / divisor, 1) : full_size_x;
+    int size_y = horizontal ? full_size_y : std::max(full_size_y / divisor, 1);
+    if (output == nullptr)
+        output = new Texture(size_x, size_y, "split_kawase_up");
+    // Note: "step" is based on *input* size, which is 2x smaller than output
+    // X or Y component is set to zero based on whether we are doing horizontal or vertical pass.
+    float step_x = horizontal ? ratio / input.width : 0.0f;
+    float step_y = horizontal ? 0.0f : ratio / input.height;
+
+    const fs_sk_up_params_t par = {
+        .uv_step[0] = step_x,
+        .uv_step[1] = step_y,
+    };
+    sg_begin_pass(sg_pass{ .action = { .colors[0] = { .load_action = SG_LOADACTION_DONTCARE } },
+        .attachments = {
+            .colors[0] = output->view_attachment,
+        } });
+    sg_apply_pipeline(ctx->pip_sk_up);
+    sg_apply_bindings(sg_bindings{
+        .views[VIEW_tex] = input.view_sample,
+        .samplers[SMP_smp] = ctx->smp_linear,
+    });
+    sg_apply_uniforms(UB_fs_sk_up_params, SG_RANGE(par));
+    sg_draw(0, 4, 1);
+    sg_end_pass();
+    return output;
+}
+
+static void split_kawase_axis(BlurContext *ctx, Texture *input, Texture *output, float radius, bool horizontal)
+{
+    // Amount of Kawase "steps" to do; this more or less matches the blur amount of Gaussian.
+    float num_steps = radius / 3.0f;
+    if (num_steps <= 0.0f)
+    {
+        kawase_copy(ctx, *input, *output);
+        return;
+    }
+
+    const int full_size_x = input->width;
+    const int full_size_y = input->height;
+
+    Texture *curr = input;
+
+    // Downsample
+    int last_pass = 0;
+    for (int i = 2; i <= num_steps; i *= 2)
+    {
+        Texture *tmp = split_kawase_downsample(ctx, *curr, full_size_x, full_size_y, i, horizontal, 1.0f);
+        if (curr != input)
+            delete curr;
+        curr = tmp;
+        last_pass = i;
+    }
+
+    float residual = num_steps - last_pass;
+    if (residual > 0.0f)
+    {
+        int next_pass = std::max(last_pass, 1) * 2;
+        float ratio = residual / (next_pass - last_pass);
+        last_pass = std::max(last_pass, 1);
+
+        // Downsample and upsample one more step
+        Texture *extra_down =
+            split_kawase_downsample(ctx, *curr, full_size_x, full_size_y, next_pass, horizontal, 1.0f);
+        Texture *extra_up =
+            split_kawase_upsample(ctx, *extra_down, full_size_x, full_size_y, last_pass, horizontal, 1.0f, nullptr);
+        delete extra_down;
+
+        // Mix current with that extra step based on ratio
+        kawase_mix(ctx, *curr, *extra_up, 1.0f - ratio);
+        if (curr != input)
+            delete curr;
+        curr = extra_up;
+
+        // If there will be no further upsamples, copy to output.
+        if (last_pass < 2)
+        {
+            kawase_copy(ctx, *curr, *output);
+            delete curr;
+        }
+    }
+
+    // Upsample.
+    for (int i = last_pass / 2; i >= 1; i /= 2)
+    {
+        bool is_last = i == 1;
+        Texture *tmp = split_kawase_upsample(
+            ctx, *curr, full_size_x, full_size_y, i, horizontal, 1.0f, is_last ? output : nullptr);
+        if (curr != input)
+            delete curr;
+        curr = tmp;
+    }
+}
+
+static void blur_split_kawase(BlurContext *ctx, Texture *input, Texture *output, const BlurParams &params)
+{
+    Texture *tmp = new Texture(input->width, input->height, "split-kawase-tmp");
+    split_kawase_axis(ctx, input, tmp, params.radius_x, true);
+    split_kawase_axis(ctx, tmp, output, params.radius_y, false);
+    delete tmp;
+}
+
+// ======== Main entry
+
 void blur_calc(BlurContext *ctx, Texture *input, Texture *output, const BlurParams &params)
 {
     if (params.mode == BLUR_DUAL_KAWASE)
         blur_dual_kawase(ctx, input, output, params);
+    else if (params.mode == BLUR_SPLIT_KAWASE)
+        blur_split_kawase(ctx, input, output, params);
     else
         blur_separable(ctx, input, output, params);
 }

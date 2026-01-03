@@ -4,10 +4,11 @@ struct Texture;
 
 enum BlurMode
 {
-    BLUR_BOX = 0,
-    BLUR_TENT = 1,
-    BLUR_GAUSSIAN = 2,
-    BLUR_DUAL_KAWASE = 3,
+    BLUR_BOX,
+    BLUR_TENT,
+    BLUR_GAUSSIAN,
+    BLUR_DUAL_KAWASE,
+    BLUR_SPLIT_KAWASE,
 };
 static_assert(sizeof(BlurMode) == sizeof(int));
 
