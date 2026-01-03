@@ -201,6 +201,58 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 }
 `;
 
+const SEPARABLE_BLUR_SHADER = `
+struct VertexOutput {
+    @builtin(position) position: vec4f,
+    @location(0) uv: vec2f,
+}
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+    // Full-screen triangle
+    var pos = array<vec2f, 3>(
+        vec2f(-1.0, -1.0),
+        vec2f( 3.0, -1.0),
+        vec2f(-1.0,  3.0)
+    );
+    var uv = array<vec2f, 3>(
+        vec2f(0.0, 1.0),
+        vec2f(2.0, 1.0),
+        vec2f(0.0, -1.0)
+    );
+
+    var output: VertexOutput;
+    output.position = vec4f(pos[vertexIndex], 0.0, 1.0);
+    output.uv = uv[vertexIndex];
+    return output;
+}
+
+struct BlurParams {
+    uvStep: vec2f,
+    kernelWidth: i32,
+}
+
+@group(0) @binding(0) var texSampler: sampler;
+@group(0) @binding(1) var tex: texture_2d<f32>;
+@group(0) @binding(2) var texKernel: texture_1d<f32>;
+@group(0) @binding(3) var<uniform> params: BlurParams;
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+    // Center sample with center weight
+    var col = textureSample(tex, texSampler, in.uv) * textureLoad(texKernel, 0, 0).r;
+
+    // Sample in both directions with symmetric weights
+    for (var i: i32 = 1; i < params.kernelWidth; i++) {
+        let w = textureLoad(texKernel, i, 0).r;
+        col += textureSample(tex, texSampler, in.uv - params.uvStep * f32(i)) * w;
+        col += textureSample(tex, texSampler, in.uv + params.uvStep * f32(i)) * w;
+    }
+
+    return col;
+}
+`;
+
 // ============================================================================
 // WebGPU State
 // ============================================================================
@@ -209,8 +261,12 @@ let device = null;
 let context = null;
 let canvasFormat = null;
 let passthroughPipeline = null;
+let separablePipeline = null;
 let sampler = null;
+let samplerNearest = null;
 let imageTexture = null;
+let blurTempTexture = null;
+let blurOutputTexture = null;
 let bindGroup = null;
 let currentImageSize = { width: 0, height: 0 };
 
@@ -264,29 +320,56 @@ async function initWebGPU() {
             alphaMode: 'premultiplied',
         });
 
-        // Create sampler
+        // Create samplers
         sampler = device.createSampler({
             magFilter: 'linear',
             minFilter: 'linear',
             addressModeU: 'clamp-to-edge',
             addressModeV: 'clamp-to-edge',
         });
+        samplerNearest = device.createSampler({
+            magFilter: 'nearest',
+            minFilter: 'nearest',
+            addressModeU: 'clamp-to-edge',
+            addressModeV: 'clamp-to-edge',
+        });
 
         // Create passthrough pipeline
-        const shaderModule = device.createShaderModule({
+        const passthroughModule = device.createShaderModule({
             code: PASSTHROUGH_SHADER,
         });
 
         passthroughPipeline = device.createRenderPipeline({
             layout: 'auto',
             vertex: {
-                module: shaderModule,
+                module: passthroughModule,
                 entryPoint: 'vs_main',
             },
             fragment: {
-                module: shaderModule,
+                module: passthroughModule,
                 entryPoint: 'fs_main',
                 targets: [{ format: canvasFormat }],
+            },
+            primitive: {
+                topology: 'triangle-list',
+            },
+        });
+
+        // Create separable blur pipeline
+        const separableModule = device.createShaderModule({
+            code: SEPARABLE_BLUR_SHADER,
+        });
+
+        separablePipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: {
+                module: separableModule,
+                entryPoint: 'vs_main',
+            },
+            fragment: {
+                module: separableModule,
+                entryPoint: 'fs_main',
+                targets: [{ format: 'rgba32float' }],
             },
             primitive: {
                 topology: 'triangle-list',
@@ -430,6 +513,142 @@ async function handleImageFile(file) {
 }
 
 // ============================================================================
+// Blur Kernel Calculation
+// ============================================================================
+
+function separableKernelValue(mode, x) {
+    x = Math.abs(x);
+    switch (mode) {
+        case BlurMode.BOX:
+            return x > 1.0 ? 0.0 : 1.0;
+        case BlurMode.TENT:
+            return x > 1.0 ? 0.0 : 1.0 - x;
+        case BlurMode.GAUSSIAN: {
+            const scale = 1.6;
+            const twoScale2 = 2.0 * scale * scale;
+            x *= 3.0 * scale;
+            return (1.0 / Math.sqrt(Math.PI * twoScale2)) * Math.exp(-x * x / twoScale2);
+        }
+        default:
+            return 0.0;
+    }
+}
+
+function calcSeparableWeights(mode, radius) {
+    // Kernel size is radius+1, but since it is symmetric we only store one half
+    const size = Math.ceil(radius) + 1;
+    const weights = new Float32Array(size);
+
+    let sum = 0.0;
+
+    // Center weight
+    const centerWeight = separableKernelValue(mode, 0.0);
+    weights[0] = centerWeight;
+    sum += centerWeight;
+
+    // Other weights in the positive direction
+    // Add double to the sum to account for negative direction
+    const scale = radius > 0.0 ? 1.0 / radius : 0.0;
+    for (let i = 1; i < size; i++) {
+        const weight = separableKernelValue(mode, i * scale);
+        weights[i] = weight;
+        sum += weight * 2.0;
+    }
+
+    // Normalize the weights
+    for (let i = 0; i < size; i++) {
+        weights[i] /= sum;
+    }
+
+    // Create 1D texture for kernel weights
+    const kernelTexture = device.createTexture({
+        size: [size],
+        format: 'r32float',
+        dimension: '1d',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+
+    device.queue.writeTexture(
+        { texture: kernelTexture },
+        weights,
+        { bytesPerRow: size * 4 },
+        { width: size }
+    );
+
+    return { texture: kernelTexture, width: size };
+}
+
+function separablePass(commandEncoder, input, output, mode, horizontal, radius) {
+    const width = currentImageSize.width;
+    const height = currentImageSize.height;
+
+    // Calculate kernel weights
+    const kernel = calcSeparableWeights(mode, radius);
+
+    // Create uniform buffer for blur params
+    const paramsData = new ArrayBuffer(16); // vec2f (8) + i32 (4) + padding (4)
+    const paramsView = new DataView(paramsData);
+    paramsView.setFloat32(0, horizontal ? 1.0 / width : 0.0, true);
+    paramsView.setFloat32(4, horizontal ? 0.0 : 1.0 / height, true);
+    paramsView.setInt32(8, kernel.width, true);
+
+    const paramsBuffer = device.createBuffer({
+        size: 16,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(paramsBuffer, 0, paramsData);
+
+    // Create bind group for this pass
+    const blurBindGroup = device.createBindGroup({
+        layout: separablePipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: sampler },
+            { binding: 1, resource: input.createView() },
+            { binding: 2, resource: kernel.texture.createView() },
+            { binding: 3, resource: { buffer: paramsBuffer } },
+        ],
+    });
+
+    const renderPass = commandEncoder.beginRenderPass({
+        colorAttachments: [{
+            view: output.createView(),
+            loadOp: 'clear',
+            storeOp: 'store',
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        }],
+    });
+
+    renderPass.setPipeline(separablePipeline);
+    renderPass.setBindGroup(0, blurBindGroup);
+    renderPass.draw(3);
+    renderPass.end();
+
+    // Resources (kernel texture, params buffer) will be garbage collected after GPU is done
+}
+
+function ensureBlurTextures(width, height) {
+    // Create or recreate temp and output textures if size changed
+    if (blurTempTexture && blurTempTexture.width === width && blurTempTexture.height === height) {
+        return;
+    }
+
+    if (blurTempTexture) blurTempTexture.destroy();
+    if (blurOutputTexture) blurOutputTexture.destroy();
+
+    blurTempTexture = device.createTexture({
+        size: [width, height],
+        format: 'rgba32float',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+
+    blurOutputTexture = device.createTexture({
+        size: [width, height],
+        format: 'rgba32float',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+}
+
+// ============================================================================
 // Canvas Sizing
 // ============================================================================
 
@@ -456,10 +675,46 @@ function fitCanvasToViewport(imageWidth, imageHeight) {
 // ============================================================================
 
 function render() {
-    if (!device || !bindGroup) return;
+    if (!device || !imageTexture) return;
+
+    const { width, height } = currentImageSize;
+    if (width === 0 || height === 0) return;
+
+    // Ensure blur textures exist
+    ensureBlurTextures(width, height);
 
     const commandEncoder = device.createCommandEncoder();
 
+    // Determine which texture to display
+    let textureToDisplay = imageTexture;
+
+    // Apply blur if radius > 0
+    if (blurParams.radiusX > 0 || blurParams.radiusY > 0) {
+        // Horizontal pass: input -> temp
+        if (blurParams.radiusX > 0) {
+            separablePass(commandEncoder, imageTexture, blurTempTexture, blurParams.mode, true, blurParams.radiusX);
+        }
+
+        // Vertical pass: temp -> output (or input -> output if no horizontal)
+        if (blurParams.radiusY > 0) {
+            const vertInput = blurParams.radiusX > 0 ? blurTempTexture : imageTexture;
+            separablePass(commandEncoder, vertInput, blurOutputTexture, blurParams.mode, false, blurParams.radiusY);
+            textureToDisplay = blurOutputTexture;
+        } else {
+            textureToDisplay = blurTempTexture;
+        }
+    }
+
+    // Create bind group for final display
+    const displayBindGroup = device.createBindGroup({
+        layout: passthroughPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: sampler },
+            { binding: 1, resource: textureToDisplay.createView() },
+        ],
+    });
+
+    // Final pass: render to screen with sRGB conversion
     const renderPass = commandEncoder.beginRenderPass({
         colorAttachments: [{
             view: context.getCurrentTexture().createView(),
@@ -470,7 +725,7 @@ function render() {
     });
 
     renderPass.setPipeline(passthroughPipeline);
-    renderPass.setBindGroup(0, bindGroup);
+    renderPass.setBindGroup(0, displayBindGroup);
     renderPass.draw(3);
     renderPass.end();
 
@@ -582,8 +837,7 @@ function setupEventHandlers() {
 }
 
 function onBlurParamsChanged() {
-    // TODO: trigger blur recalculation when shaders are implemented
-    console.log('Blur params changed:', blurParams);
+    render();
 }
 
 // ============================================================================
