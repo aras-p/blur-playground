@@ -343,16 +343,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 }
 `;
 
-const DK_COPY_SHADER = DK_VERTEX_SHADER + `
-@group(0) @binding(0) var texSampler: sampler;
-@group(0) @binding(1) var tex: texture_2d<f32>;
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    return textureSample(tex, texSampler, in.uv);
-}
-`;
-
 const SPLIT_KAWASE_STEP_SHADER = DK_VERTEX_SHADER + `
 struct Params {
     uvStep: vec2f,
@@ -398,7 +388,6 @@ let separablePipeline = null;
 let dkDownPipeline = null;
 let dkUpPipeline = null;
 let dkMixPipeline = null;
-let dkCopyPipeline = null;
 let splitKawasePipeline = null;
 let sampler = null;
 let samplerNearest = null;
@@ -528,7 +517,6 @@ async function initWebGPU() {
         const dkDownModule = device.createShaderModule({ code: DK_DOWNSAMPLE_SHADER });
         const dkUpModule = device.createShaderModule({ code: DK_UPSAMPLE_SHADER });
         const dkMixModule = device.createShaderModule({ code: DK_MIX_SHADER });
-        const dkCopyModule = device.createShaderModule({ code: DK_COPY_SHADER });
 
         dkDownPipeline = device.createRenderPipeline({
             layout: 'auto',
@@ -566,13 +554,6 @@ async function initWebGPU() {
                     },
                 }],
             },
-            primitive: { topology: 'triangle-list' },
-        });
-
-        dkCopyPipeline = device.createRenderPipeline({
-            layout: 'auto',
-            vertex: { module: dkCopyModule, entryPoint: 'vs_main' },
-            fragment: { module: dkCopyModule, entryPoint: 'fs_main', targets: [{ format: 'rgba32float' }] },
             primitive: { topology: 'triangle-list' },
         });
 
@@ -660,11 +641,7 @@ function createTextureFromLinearData(linearData) {
     // Clear cached textures (pyramid sizes depend on image size)
     clearTextureCache();
 
-    imageTexture = device.createTexture({
-        size: [width, height],
-        format: 'rgba32float',
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
-    });
+    imageTexture = createTexture2D(width, height);
 
     device.queue.writeTexture(
         { texture: imageTexture },
@@ -847,30 +824,25 @@ function ensureBlurTextures(width, height) {
     if (blurTempTexture) blurTempTexture.destroy();
     if (blurOutputTexture) blurOutputTexture.destroy();
 
-    blurTempTexture = device.createTexture({
-        size: [width, height],
-        format: 'rgba32float',
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
-    });
+    blurTempTexture = createTexture2D(width, height);
+    blurOutputTexture = createTexture2D(width, height);
+}
 
-    blurOutputTexture = device.createTexture({
+// ============================================================================
+// Texture Helpers
+// ============================================================================
+
+function createTexture2D(width, height) {
+    return device.createTexture({
         size: [width, height],
         format: 'rgba32float',
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
     });
 }
 
 // ============================================================================
 // Dual Kawase Blur
 // ============================================================================
-
-function createDKTexture(width, height) {
-    return device.createTexture({
-        size: [width, height],
-        format: 'rgba32float',
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
-    });
-}
 
 // Get a uniform buffer from pool (creates if needed)
 function getKawaseUniformBuffer(size) {
@@ -904,7 +876,7 @@ function getCachedTexture(width, height) {
         }
     }
     // Create new texture
-    const texture = createDKTexture(width, height);
+    const texture = createTexture2D(width, height);
     textures.push({ texture, inUse: true });
     return texture;
 }
@@ -1035,27 +1007,11 @@ function kawaseMix(commandEncoder, input, output, ratio) {
 }
 
 function kawaseCopy(commandEncoder, input, output) {
-    const bindGroup = device.createBindGroup({
-        layout: dkCopyPipeline.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: samplerNearest },
-            { binding: 1, resource: input.createView() },
-        ],
-    });
-
-    const renderPass = commandEncoder.beginRenderPass({
-        colorAttachments: [{
-            view: output.createView(),
-            loadOp: 'clear',
-            storeOp: 'store',
-            clearValue: { r: 0, g: 0, b: 0, a: 1 },
-        }],
-    });
-
-    renderPass.setPipeline(dkCopyPipeline);
-    renderPass.setBindGroup(0, bindGroup);
-    renderPass.draw(3);
-    renderPass.end();
+    commandEncoder.copyTextureToTexture(
+        { texture: input },
+        { texture: output },
+        [input.width, input.height]
+    );
 }
 
 function blurDualKawase(commandEncoder, input, output) {
