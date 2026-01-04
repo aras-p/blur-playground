@@ -79,7 +79,7 @@ body {
     font-size: 12px;
     color: #888;
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: 1px;
 }
 .radio-group {
     display: flex;
@@ -238,27 +238,27 @@ body {
         <div class="weight-group">
             <div class="weight-group-label">Downsample</div>
             <div class="weight-row">
-                <label>0.0:</label>
+                <label for="downW00">0.0:</label>
                 <input type="range" id="downW00" min="0" max="4" step="0.01" value="2.12">
                 <span class="value" id="downW00Value">2.12</span>
             </div>
             <div class="weight-row">
-                <label>0.5:</label>
+                <label for="downW05">0.5:</label>
                 <input type="range" id="downW05" min="0" max="4" step="0.01" value="0.75">
                 <span class="value" id="downW05Value">0.75</span>
             </div>
             <div class="weight-row">
-                <label>1.0:</label>
+                <label for="downW10">1.0:</label>
                 <input type="range" id="downW10" min="0" max="4" step="0.01" value="1.30">
                 <span class="value" id="downW10Value">1.30</span>
             </div>
             <div class="weight-row">
-                <label>1.5:</label>
+                <label for="downW15">1.5:</label>
                 <input type="range" id="downW15" min="0" max="4" step="0.01" value="0.10">
                 <span class="value" id="downW15Value">0.10</span>
             </div>
             <div class="weight-row">
-                <label>2.0:</label>
+                <label for="downW20">2.0:</label>
                 <input type="range" id="downW20" min="0" max="4" step="0.01" value="0.15">
                 <span class="value" id="downW20Value">0.15</span>
             </div>
@@ -266,27 +266,27 @@ body {
         <div class="weight-group">
             <div class="weight-group-label">Upsample</div>
             <div class="weight-row">
-                <label>0.0:</label>
+                <label for="upW00">0.0:</label>
                 <input type="range" id="upW00" min="0" max="4" step="0.01" value="0.00">
                 <span class="value" id="upW00Value">0.00</span>
             </div>
             <div class="weight-row">
-                <label>0.5:</label>
+                <label for="upW05">0.5:</label>
                 <input type="range" id="upW05" min="0" max="4" step="0.01" value="2.80">
                 <span class="value" id="upW05Value">2.80</span>
             </div>
             <div class="weight-row">
-                <label>1.0:</label>
+                <label for="upW10">1.0:</label>
                 <input type="range" id="upW10" min="0" max="4" step="0.01" value="0.70">
                 <span class="value" id="upW10Value">0.70</span>
             </div>
             <div class="weight-row">
-                <label>1.5:</label>
+                <label for="upW15">1.5:</label>
                 <input type="range" id="upW15" min="0" max="4" step="0.01" value="0.00">
                 <span class="value" id="upW15Value">0.00</span>
             </div>
             <div class="weight-row">
-                <label>2.0:</label>
+                <label for="upW20">2.0:</label>
                 <input type="range" id="upW20" min="0" max="4" step="0.01" value="0.01">
                 <span class="value" id="upW20Value">0.01</span>
             </div>
@@ -479,7 +479,6 @@ let cur_image_size = { width: 0, height: 0 };
 /** @type {GPUBuffer[]} */
 let kawaseUniformBuffers = [];
 let kawaseUniformBufferIndex = 0;
-/** @type {Map<string, GPUTexture>} */
 let kawaseTextureCache = new Map();
 
 // ================ Various helpers
@@ -670,7 +669,7 @@ function imageToLinearFloat(img) {
     const floatData = new Float32Array(img.width * img.height * 4);
     for (let i = 0; i < pixels.length; i += 4) {
         const idx = i;
-        floatData[idx + 0] = srgbToLinear(pixels[i + 0]);
+        floatData[idx] = srgbToLinear(pixels[i]);
         floatData[idx + 1] = srgbToLinear(pixels[i + 1]);
         floatData[idx + 2] = srgbToLinear(pixels[i + 2]);
         floatData[idx + 3] = pixels[i + 3] / 255.0;
@@ -905,7 +904,7 @@ function ensureBlurTextures(width, height) {
 // ================ Dual Kawase blur
 
 // Get a uniform buffer from pool (creates if needed)
-function getKawaseUniformBuffer(size) {
+function getKawaseUniformBuffer() {
     if (kawaseUniformBufferIndex >= kawaseUniformBuffers.length) {
         kawaseUniformBuffers.push(gpu_device.createBuffer({
             size: 32,  // Max size needed (Split Kawase params)
