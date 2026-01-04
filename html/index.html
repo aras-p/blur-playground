@@ -450,6 +450,34 @@ function createTexture2D(width, height) {
     });
 }
 
+function createSampler(filter) {
+    return gpu_device.createSampler({
+        magFilter: filter,
+        minFilter: filter,
+        addressModeU: 'clamp-to-edge',
+        addressModeV: 'clamp-to-edge',
+    })
+}
+
+function createPipeline(codeString, rtFormat = 'rgba32float', blending = false) {
+    const shader_mod = gpu_device.createShaderModule({
+        code: codeString,
+    });
+    const target = { format: rtFormat };
+    if (blending) {
+        target.blend = {
+            color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add', },
+            alpha: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add', },
+        };
+    }
+    return gpu_device.createRenderPipeline({
+        layout: 'auto',
+        vertex: { module: shader_mod, entryPoint: 'vs_main', },
+        fragment: { module: shader_mod, entryPoint: 'fs_main', targets: [target], },
+        primitive: { topology: 'triangle-list', },
+    })
+}
+
 function fitCanvasToViewport(imageWidth, imageHeight) {
     const canvas = document.getElementById('canvas');
     const margin = 20; // pixels of margin around canvas
@@ -519,113 +547,15 @@ async function initWebGPU() {
             alphaMode: 'premultiplied',
         });
 
-        // Create samplers
-        gpu_sampler_linear = gpu_device.createSampler({
-            magFilter: 'linear',
-            minFilter: 'linear',
-            addressModeU: 'clamp-to-edge',
-            addressModeV: 'clamp-to-edge',
-        });
-        gpu_sampler_point = gpu_device.createSampler({
-            magFilter: 'nearest',
-            minFilter: 'nearest',
-            addressModeU: 'clamp-to-edge',
-            addressModeV: 'clamp-to-edge',
-        });
+        gpu_sampler_linear = createSampler('linear');
+        gpu_sampler_point = createSampler('nearest');
 
-        const displayModule = gpu_device.createShaderModule({
-            code: DISPLAY_SHADER,
-        });
-
-        pip_display = gpu_device.createRenderPipeline({
-            layout: 'auto',
-            vertex: {
-                module: displayModule,
-                entryPoint: 'vs_main',
-            },
-            fragment: {
-                module: displayModule,
-                entryPoint: 'fs_main',
-                targets: [{ format: gpu_canvas_format }],
-            },
-            primitive: {
-                topology: 'triangle-list',
-            },
-        });
-
-        // Create separable blur pipeline
-        const separableModule = gpu_device.createShaderModule({
-            code: SEPARABLE_BLUR_SHADER,
-        });
-
-        pip_separable = gpu_device.createRenderPipeline({
-            layout: 'auto',
-            vertex: {
-                module: separableModule,
-                entryPoint: 'vs_main',
-            },
-            fragment: {
-                module: separableModule,
-                entryPoint: 'fs_main',
-                targets: [{ format: 'rgba32float' }],
-            },
-            primitive: {
-                topology: 'triangle-list',
-            },
-        });
-
-        // Create Dual Kawase pipelines
-        const dkDownModule = gpu_device.createShaderModule({ code: DK_DOWNSAMPLE_SHADER });
-        const dkUpModule = gpu_device.createShaderModule({ code: DK_UPSAMPLE_SHADER });
-        const dkMixModule = gpu_device.createShaderModule({ code: DK_MIX_SHADER });
-
-        pip_dk_down = gpu_device.createRenderPipeline({
-            layout: 'auto',
-            vertex: { module: dkDownModule, entryPoint: 'vs_main' },
-            fragment: { module: dkDownModule, entryPoint: 'fs_main', targets: [{ format: 'rgba32float' }] },
-            primitive: { topology: 'triangle-list' },
-        });
-
-        pip_dk_up = gpu_device.createRenderPipeline({
-            layout: 'auto',
-            vertex: { module: dkUpModule, entryPoint: 'vs_main' },
-            fragment: { module: dkUpModule, entryPoint: 'fs_main', targets: [{ format: 'rgba32float' }] },
-            primitive: { topology: 'triangle-list' },
-        });
-
-        pip_dk_mix = gpu_device.createRenderPipeline({
-            layout: 'auto',
-            vertex: { module: dkMixModule, entryPoint: 'vs_main' },
-            fragment: {
-                module: dkMixModule,
-                entryPoint: 'fs_main',
-                targets: [{
-                    format: 'rgba32float',
-                    blend: {
-                        color: {
-                            srcFactor: 'src-alpha',
-                            dstFactor: 'one-minus-src-alpha',
-                            operation: 'add',
-                        },
-                        alpha: {
-                            srcFactor: 'src-alpha',
-                            dstFactor: 'one-minus-src-alpha',
-                            operation: 'add',
-                        },
-                    },
-                }],
-            },
-            primitive: { topology: 'triangle-list' },
-        });
-
-        // Create Split Kawase pipeline
-        const splitKawaseModule = gpu_device.createShaderModule({ code: SPLIT_KAWASE_STEP_SHADER });
-        pip_split_kaw = gpu_device.createRenderPipeline({
-            layout: 'auto',
-            vertex: { module: splitKawaseModule, entryPoint: 'vs_main' },
-            fragment: { module: splitKawaseModule, entryPoint: 'fs_main', targets: [{ format: 'rgba32float' }] },
-            primitive: { topology: 'triangle-list' },
-        });
+        pip_display = createPipeline(DISPLAY_SHADER, gpu_canvas_format);
+        pip_separable = createPipeline(SEPARABLE_BLUR_SHADER);
+        pip_dk_down = createPipeline(DK_DOWNSAMPLE_SHADER);
+        pip_dk_up = createPipeline(DK_UPSAMPLE_SHADER);
+        pip_split_kaw = createPipeline(SPLIT_KAWASE_STEP_SHADER);
+        pip_dk_mix = createPipeline(DK_MIX_SHADER, undefined, true);
 
         statusEl.textContent = 'WebGPU ready. Load an image to begin.';
         return true;
