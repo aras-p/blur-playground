@@ -24,7 +24,6 @@ Implementation of several image blurring algorithms. Runs in the browser
 
 - Drag & drop or browse for images (PNG/JPG/EXR),
 - Adjustable blur radius (X/Y can be locked or independent),
-- RMSE calculation comparing blur output to Gaussian reference,
 - Split Kawase weight controls.
 
 ### External code
