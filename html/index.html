@@ -440,6 +440,34 @@ let kawaseUniformBuffers = [];  // Pool of uniform buffers
 let kawaseUniformBufferIndex = 0;
 let kawaseTextureCache = new Map();  // Cache textures by "width,height" key
 
+// ================ Various helpers
+
+function createTexture2D(width, height) {
+    return gpu_device.createTexture({
+        size: [width, height],
+        format: 'rgba32float',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
+    });
+}
+
+function fitCanvasToViewport(imageWidth, imageHeight) {
+    const canvas = document.getElementById('canvas');
+    const margin = 20; // pixels of margin around canvas
+
+    // Available space (viewport minus controls and margins)
+    const controlsHeight = document.querySelector('.controls').offsetHeight;
+    const maxWidth = window.innerWidth - margin * 2;
+    const maxHeight = window.innerHeight - controlsHeight - margin * 3;
+
+    // Calculate scale to fit
+    const scaleX = maxWidth / imageWidth;
+    const scaleY = maxHeight / imageHeight;
+    const scale = Math.min(scaleX, scaleY, 4.0); // don't scale up by more than 4x
+
+    canvas.style.width = Math.floor(imageWidth * scale) + 'px';
+    canvas.style.height = Math.floor(imageHeight * scale) + 'px';
+}
+
 // ================ Blur parameters
 
 const BlurMode = {
@@ -882,34 +910,6 @@ function ensureBlurTextures(width, height) {
 
     tex_blur_tmp = createTexture2D(width, height);
     tex_blurred = createTexture2D(width, height);
-}
-
-// ================ Various helpers
-
-function createTexture2D(width, height) {
-    return gpu_device.createTexture({
-        size: [width, height],
-        format: 'rgba32float',
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
-    });
-}
-
-function fitCanvasToViewport(imageWidth, imageHeight) {
-    const canvas = document.getElementById('canvas');
-    const margin = 20; // pixels of margin around canvas
-
-    // Available space (viewport minus controls and margins)
-    const controlsHeight = document.querySelector('.controls').offsetHeight;
-    const maxWidth = window.innerWidth - margin * 2;
-    const maxHeight = window.innerHeight - controlsHeight - margin * 3;
-
-    // Calculate scale to fit
-    const scaleX = maxWidth / imageWidth;
-    const scaleY = maxHeight / imageHeight;
-    const scale = Math.min(scaleX, scaleY, 4.0); // don't scale up by more than 4x
-
-    canvas.style.width = Math.floor(imageWidth * scale) + 'px';
-    canvas.style.height = Math.floor(imageHeight * scale) + 'px';
 }
 
 // ================ Dual Kawase blur
