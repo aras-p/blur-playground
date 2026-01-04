@@ -54,10 +54,47 @@ body {
     color: #aaa;
     text-decoration: underline;
 }
+.main-container {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+}
 #canvas {
     border: 1px solid #333;
     max-width: 100%;
     background: #000;
+}
+.texture-list-container {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 180px;
+}
+.texture-list-container label {
+    font-size: 12px;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+#textureList {
+    background: #252525;
+    border: 1px solid #444;
+    border-radius: 4px;
+    color: #e0e0e0;
+    font-size: 12px;
+    font-family: monospace;
+    min-height: 300px;
+    max-height: 600px;
+    overflow-y: auto;
+}
+#textureList option {
+    padding: 4px 8px;
+}
+#textureList option:checked {
+    background: #444;
+}
+#textureList option.final-output {
+    font-weight: bold;
 }
 #status {
     margin-top: 10px;
@@ -214,13 +251,13 @@ body {
         <label>Blur Radius</label>
         <div class="slider-row">
             <label for="radiusX">X:</label>
-            <input type="range" id="radiusX" min="0" max="500" value="10">
-            <span class="value" id="radiusXValue">10</span>
+            <input type="range" id="radiusX" min="0" max="500" value="24">
+            <span class="value" id="radiusXValue">24</span>
         </div>
         <div class="slider-row disabled" id="radiusYRow">
             <label for="radiusY">Y:</label>
-            <input type="range" id="radiusY" min="0" max="500" value="10" disabled>
-            <span class="value" id="radiusYValue">10</span>
+            <input type="range" id="radiusY" min="0" max="500" value="24" disabled>
+            <span class="value" id="radiusYValue">24</span>
         </div>
         <div class="checkbox-row">
             <input type="checkbox" id="lockRadius" checked>
@@ -295,7 +332,15 @@ body {
         <button class="reset-btn" id="resetWeights">Reset to Defaults</button>
     </div>
 </div>
-<canvas id="canvas" width="800" height="600"></canvas>
+<div class="main-container">
+    <canvas id="canvas" width="800" height="600"></canvas>
+    <div class="texture-list-container">
+        <label>Display Texture</label>
+        <select id="textureList" size="8">
+            <option value="-1" selected class="final-output">Blurred Output</option>
+        </select>
+    </div>
+</div>
 <div id="status">WebGPU initializing...</div>
 <div id="error"></div>
 
@@ -481,6 +526,11 @@ let kawaseUniformBuffers = [];
 let kawaseUniformBufferIndex = 0;
 let kawaseTextureCache = new Map();
 
+// Intermediate texture tracking for visualization
+// Array of { texture, name } where name is a debug string
+let intermediateTextures = [];
+let selectedTextureIndex = -1; // -1 means "Blurred Output"
+
 // ================ Various helpers
 
 function createTexture2D(width, height) {
@@ -549,8 +599,8 @@ const BlurMode = {
 
 const blur_params = {
     mode: BlurMode.DUAL_KAWASE,
-    radius_x: 10,
-    radius_y: 10,
+    radius_x: 24,
+    radius_y: 24,
     lock_radius: true,
     lock_pow2: false,
     // Split Kawase filter configs
@@ -765,7 +815,8 @@ async function handleImageFile(file) {
         cur_image_size = { width, height };
         fitCanvasToViewport(width, height);
 
-        // Render
+        // Reset texture selection and render
+        resetTextureSelection();
         render();
 
         statusEl.textContent = `Loaded: ${file.name} (${width}x${height})`;
@@ -1093,6 +1144,10 @@ function blurDualKawase(commandEncoder, input, output) {
     let lastPass = 0;
     for (let i = 2; i <= numSteps; i *= 2) {
         curr = kawaseDownsample(commandEncoder, curr, fullSizeX, fullSizeY, i, 1.0);
+        intermediateTextures.push({
+            texture: curr,
+            name: `Down (1/${i}): ${curr.width}×${curr.height}`
+        });
         lastPass = i;
     }
 
@@ -1104,7 +1159,15 @@ function blurDualKawase(commandEncoder, input, output) {
 
         // Downsample and upsample one more step
         const extraDown = kawaseDownsample(commandEncoder, curr, fullSizeX, fullSizeY, nextPass, 0.5 + 0.5 * ratio);
+        intermediateTextures.push({
+            texture: extraDown,
+            name: `Residual down: ${extraDown.width}×${extraDown.height}`
+        });
         const extraUp = kawaseUpsample(commandEncoder, extraDown, fullSizeX, fullSizeY, lastPass, 0.5 + 0.5 * ratio);
+        intermediateTextures.push({
+            texture: extraUp,
+            name: `Residual up: ${extraUp.width}×${extraUp.height}`
+        });
 
         // Mix current with that extra step based on ratio
         kawaseMix(commandEncoder, curr, extraUp, 1.0 - ratio);
@@ -1121,6 +1184,12 @@ function blurDualKawase(commandEncoder, input, output) {
     for (let i = Math.floor(lastPass / 2); i >= 1; i = Math.floor(i / 2)) {
         const isLast = i === 1;
         curr = kawaseUpsample(commandEncoder, curr, fullSizeX, fullSizeY, i, 1.0, isLast ? output : null);
+        if (!isLast) {
+            intermediateTextures.push({
+                texture: curr,
+                name: `Up (1/${i}): ${curr.width}×${curr.height}`
+            });
+        }
     }
 }
 
@@ -1166,9 +1235,10 @@ function splitKawaseStep(commandEncoder, cfg, input, fullSizeX, fullSizeY, divis
     return output;
 }
 
-function splitKawaseAxis(commandEncoder, cfgDown, cfgUp, input, output, radius, horizontal) {
+function splitKawaseAxis(commandEncoder, cfgDown, cfgUp, input, output, radius, horizontal, trackIntermediates = false) {
     // Amount of Kawase "steps" to do; this more or less matches the blur amount of Gaussian
     const numSteps = radius / 3.0;
+    const axisName = horizontal ? 'H' : 'V';
 
     const fullSizeX = cur_image_size.width;
     const fullSizeY = cur_image_size.height;
@@ -1179,6 +1249,12 @@ function splitKawaseAxis(commandEncoder, cfgDown, cfgUp, input, output, radius, 
     let lastPass = 0;
     for (let i = 2; i <= numSteps; i *= 2) {
         curr = splitKawaseStep(commandEncoder, cfgDown, curr, fullSizeX, fullSizeY, i, horizontal);
+        if (trackIntermediates) {
+            intermediateTextures.push({
+                texture: curr,
+                name: `${axisName} Down (1/${i}): ${curr.width}×${curr.height}`
+            });
+        }
         lastPass = i;
     }
 
@@ -1190,7 +1266,19 @@ function splitKawaseAxis(commandEncoder, cfgDown, cfgUp, input, output, radius, 
 
         // Downsample and upsample one more step
         const extraDown = splitKawaseStep(commandEncoder, cfgDown, curr, fullSizeX, fullSizeY, nextPass, horizontal);
+        if (trackIntermediates) {
+            intermediateTextures.push({
+                texture: extraDown,
+                name: `${axisName} Residual Down: ${extraDown.width}×${extraDown.height}`
+            });
+        }
         const extraUp = splitKawaseStep(commandEncoder, cfgUp, extraDown, fullSizeX, fullSizeY, lastPass, horizontal);
+        if (trackIntermediates) {
+            intermediateTextures.push({
+                texture: extraUp,
+                name: `${axisName} Residual Up: ${extraUp.width}×${extraUp.height}`
+            });
+        }
 
         // Mix current with that extra step based on ratio
         kawaseMix(commandEncoder, curr, extraUp, 1.0 - ratio);
@@ -1200,6 +1288,13 @@ function splitKawaseAxis(commandEncoder, cfgDown, cfgUp, input, output, radius, 
     // Upsample
     for (let i = Math.floor(lastPass / 2); i >= 1; i = Math.floor(i / 2)) {
         curr = splitKawaseStep(commandEncoder, cfgUp, curr, fullSizeX, fullSizeY, i, horizontal);
+        if (trackIntermediates && i > 1) {
+            intermediateTextures.push({
+                texture: curr,
+                name: `${axisName} Up (1/${i}): ${curr.width}×${curr.height}`
+            });
+        }
+        lastPass = i;
     }
 
     // Copy to output
@@ -1210,13 +1305,73 @@ function blurSplitKawase(commandEncoder, input, output) {
     // Get temp texture for intermediate result between X and Y passes
     const tmp = getCachedTexture(cur_image_size.width, cur_image_size.height);
 
-    // Horizontal pass: input -> tmp
+    // Horizontal pass: input -> tmp (track intermediates)
     splitKawaseAxis(commandEncoder, blur_params.split_cfg_down, blur_params.split_cfg_up,
-        input, tmp, blur_params.radius_x, true);
+        input, tmp, blur_params.radius_x, true, true);
 
-    // Vertical pass: tmp -> output
+    // Track the final horizontal pass result
+    if (blur_params.radius_x > 0) {
+        intermediateTextures.push({
+            texture: tmp,
+            name: `H Output: ${tmp.width}×${tmp.height}`
+        });
+    }
+
+    // Vertical pass: tmp -> output (track intermediates)
     splitKawaseAxis(commandEncoder, blur_params.split_cfg_down, blur_params.split_cfg_up,
-        tmp, output, blur_params.radius_y, false);
+        tmp, output, blur_params.radius_y, false, true);
+}
+
+// ================ Texture list management
+
+function updateTextureList() {
+    const list = document.getElementById('textureList');
+
+    // Clear existing options
+    list.innerHTML = '';
+
+    // Add source image option
+    const sourceOption = document.createElement('option');
+    sourceOption.value = -2;
+    sourceOption.textContent = `Source Input: ${cur_image_size.width}×${cur_image_size.height}`;
+    list.appendChild(sourceOption);
+
+    // Add intermediate textures
+    for (let i = 0; i < intermediateTextures.length; i++) {
+        const option = document.createElement('option');
+        option.value = i;
+        option.textContent = intermediateTextures[i].name;
+        list.appendChild(option);
+    }
+
+    // Add final output option
+    const finalOption = document.createElement('option');
+    finalOption.value = -1;
+    finalOption.textContent = `Blurred Output: ${cur_image_size.width}×${cur_image_size.height}`;
+    finalOption.className = 'final-output';
+    list.appendChild(finalOption);
+
+    // Select current index (or final if out of range)
+    if (selectedTextureIndex >= intermediateTextures.length && selectedTextureIndex >= 0) {
+        selectedTextureIndex = -1;
+    }
+    list.value = selectedTextureIndex;
+}
+
+function resetTextureSelection() {
+    selectedTextureIndex = -1;
+    const list = document.getElementById('textureList');
+    if (list) list.value = -1;
+}
+
+function getDisplayTexture(blurredOutput) {
+    if (selectedTextureIndex === -2) {
+        return tex_source;
+    }
+    if (selectedTextureIndex >= 0 && selectedTextureIndex < intermediateTextures.length) {
+        return intermediateTextures[selectedTextureIndex].texture;
+    }
+    return blurredOutput;
 }
 
 // ================ Rendering
@@ -1233,39 +1388,50 @@ async function render() {
     // Reset resource pools for this frame
     resetKawaseUniformBufferPool();
     resetTextureCache();
+    intermediateTextures = [];
 
     const commandEncoder = gpu_device.createCommandEncoder();
 
-    // Determine which texture to display
-    let textureToDisplay = tex_source;
+    // Determine which texture to display (before selection override)
+    let blurredOutput = tex_source;
 
     // Apply blur if radius > 0
     if (blur_params.radius_x > 0 || blur_params.radius_y > 0) {
         if (blur_params.mode === BlurMode.DUAL_KAWASE) {
             // Dual Kawase blur
             blurDualKawase(commandEncoder, tex_source, tex_blurred);
-            textureToDisplay = tex_blurred;
+            blurredOutput = tex_blurred;
         } else if (blur_params.mode === BlurMode.SPLIT_KAWASE) {
             // Split Kawase blur
             blurSplitKawase(commandEncoder, tex_source, tex_blurred);
-            textureToDisplay = tex_blurred;
+            blurredOutput = tex_blurred;
         } else {
             // Separable blur (Box, Tent, Gaussian)
             // Horizontal pass: input -> temp
             if (blur_params.radius_x > 0) {
                 separablePass(commandEncoder, tex_source, tex_blur_tmp, blur_params.mode, true, blur_params.radius_x);
+                intermediateTextures.push({
+                    texture: tex_blur_tmp,
+                    name: `Horizontal: ${tex_blur_tmp.width}×${tex_blur_tmp.height}`
+                });
             }
 
             // Vertical pass: temp -> output (or input -> output if no horizontal)
             if (blur_params.radius_y > 0) {
                 const vertInput = blur_params.radius_x > 0 ? tex_blur_tmp : tex_source;
                 separablePass(commandEncoder, vertInput, tex_blurred, blur_params.mode, false, blur_params.radius_y);
-                textureToDisplay = tex_blurred;
+                blurredOutput = tex_blurred;
             } else {
-                textureToDisplay = tex_blur_tmp;
+                blurredOutput = tex_blur_tmp;
             }
         }
     }
+
+    // Update the texture list UI
+    updateTextureList();
+
+    // Get the texture to display based on selection
+    const textureToDisplay = getDisplayTexture(blurredOutput);
 
     // Create bind group for final display
     const displayBindGroup = gpu_device.createBindGroup({
@@ -1299,6 +1465,12 @@ async function render() {
 function setupEventHandlers() {
     const dropzone = document.getElementById('dropzone');
     const fileInput = document.getElementById('fileInput');
+
+    // Texture list selection
+    document.getElementById('textureList').addEventListener('change', (e) => {
+        selectedTextureIndex = parseInt(e.target.value);
+        render();
+    });
 
     // Click to browse
     dropzone.addEventListener('click', () => {
@@ -1367,6 +1539,8 @@ function setupEventHandlers() {
             blur_params.mode = e.target.value;
             // Enable/disable Split Kawase weight controls
             splitKawaseControls.classList.toggle('enabled', e.target.value === 'split_kawase');
+            // Reset texture selection to final output when blur mode changes
+            resetTextureSelection();
             onBlurParamsChanged();
         });
     });
