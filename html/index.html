@@ -181,10 +181,10 @@ body {
     <div class="control-group">
         <label>Blur Mode</label>
         <div class="radio-group">
-            <label><input type="radio" name="blurMode" value="box" checked> Box</label>
+            <label><input type="radio" name="blurMode" value="box"> Box</label>
             <label><input type="radio" name="blurMode" value="tent"> Tent</label>
             <label><input type="radio" name="blurMode" value="gaussian"> Gaussian</label>
-            <label><input type="radio" name="blurMode" value="dual_kawase"> Dual Kawase</label>
+            <label><input type="radio" name="blurMode" value="dual_kawase" checked> Dual Kawase</label>
             <label><input type="radio" name="blurMode" value="split_kawase"> Split Kawase</label>
         </div>
     </div>
@@ -451,7 +451,7 @@ const BlurMode = {
 };
 
 const blur_params = {
-    mode: BlurMode.BOX,
+    mode: BlurMode.DUAL_KAWASE,
     radius_x: 10,
     radius_y: 10,
     lock_radius: true,
