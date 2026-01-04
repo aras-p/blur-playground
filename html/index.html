@@ -853,11 +853,18 @@ function createTextureFromLinearData(linearData) {
 async function loadEXR(file) {
     const arrayBuffer = await file.arrayBuffer();
     const result = window.parseEXR(arrayBuffer);
-    return {
-        data: result.data,
-        width: result.width,
-        height: result.height
-    };
+
+    // EXR files are stored bottom-to-top, flip vertically
+    const { width, height, data } = result;
+    const flipped = new Float32Array(data.length);
+    const rowSize = width * 4; // RGBA
+    for (let y = 0; y < height; y++) {
+        const srcRow = (height - 1 - y) * rowSize;
+        const dstRow = y * rowSize;
+        flipped.set(data.subarray(srcRow, srcRow + rowSize), dstRow);
+    }
+
+    return { data: flipped, width, height };
 }
 
 async function handleImageFile(file) {
