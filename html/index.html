@@ -282,49 +282,34 @@ body {
 <script src="fflate.js"></script>
 <script src="exrloader.js"></script>
 <script>
-// ============ Shaders
-
+// ================ Shaders
 const FULLSCREEN_VERTEX_SHADER = `
-// full-screen triangle
 struct VertexOutput {
     @builtin(position) position: vec4f,
     @location(0) uv: vec2f,
 }
 @vertex
-fn vs_main(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
-    var pos = array<vec2f, 3>(
-        vec2f(-1.0, -1.0),
-        vec2f( 3.0, -1.0),
-        vec2f(-1.0,  3.0)
-    );
-    var uv = array<vec2f, 3>(
-        vec2f(0.0, 1.0),
-        vec2f(2.0, 1.0),
-        vec2f(0.0, -1.0)
-    );
-    var output: VertexOutput;
-    output.position = vec4f(pos[vertexIndex], 0.0, 1.0);
-    output.uv = uv[vertexIndex];
-    return output;
+fn vs_main(@builtin(vertex_index) vid: u32) -> VertexOutput {
+    var o: VertexOutput;
+    // full-screen triangle
+    o.uv = vec2f(select(0.0, 2.0, (vid & 1u) != 0u), select(1.0, -1.0, (vid & 2u) != 0u));
+    o.position = vec4f(o.uv.x * 2.0 - 1.0, -(o.uv.y * 2.0 - 1.0), 0.0, 1.0);
+    return o;
 }
 `;
 
-const PASSTHROUGH_SHADER = FULLSCREEN_VERTEX_SHADER + `
-@group(0) @binding(0) var texSampler: sampler;
+const DISPLAY_SHADER = FULLSCREEN_VERTEX_SHADER + `
+@group(0) @binding(0) var smp: sampler;
 @group(0) @binding(1) var tex: texture_2d<f32>;
-
-// Linear to sRGB conversion
-fn linearToSrgb(linear: vec3f) -> vec3f {
-    let cutoff = linear < vec3f(0.0031308);
-    let higher = vec3f(1.055) * pow(linear, vec3f(1.0/2.4)) - vec3f(0.055);
-    let lower = linear * vec3f(12.92);
-    return select(higher, lower, cutoff);
+fn linearToSrgb(x: vec3f) -> vec3f {
+    return select(
+        vec3f(1.055) * pow(x, vec3f(1.0/2.4)) - vec3f(0.055),
+        x * vec3f(12.92),
+        x < vec3f(0.0031308));
 }
-
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    let color = textureSample(tex, texSampler, in.uv);
-    // Convert from linear back to sRGB for display
+    let color = textureSample(tex, smp, in.uv);
     return vec4f(linearToSrgb(color.rgb), color.a);
 }
 `;
@@ -334,24 +319,19 @@ struct BlurParams {
     uvStep: vec2f,
     kernelWidth: i32,
 }
-
-@group(0) @binding(0) var texSampler: sampler;
+@group(0) @binding(0) var smp: sampler;
 @group(0) @binding(1) var tex: texture_2d<f32>;
 @group(0) @binding(2) var texKernel: texture_1d<f32>;
 @group(0) @binding(3) var<uniform> params: BlurParams;
-
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    // Center sample with center weight
-    var col = textureSample(tex, texSampler, in.uv) * textureLoad(texKernel, 0, 0).r;
-
-    // Sample in both directions with symmetric weights
+    var col = textureSample(tex, smp, in.uv) * textureLoad(texKernel, 0, 0).r;
     for (var i: i32 = 1; i < params.kernelWidth; i++) {
         let w = textureLoad(texKernel, i, 0).r;
-        col += textureSample(tex, texSampler, in.uv - params.uvStep * f32(i)) * w;
-        col += textureSample(tex, texSampler, in.uv + params.uvStep * f32(i)) * w;
+        let offset = params.uvStep * f32(i);
+        col += textureSample(tex, smp, in.uv - offset) * w;
+        col += textureSample(tex, smp, in.uv + offset) * w;
     }
-
     return col;
 }
 `;
@@ -360,19 +340,17 @@ const DK_DOWNSAMPLE_SHADER = FULLSCREEN_VERTEX_SHADER + `
 struct Params {
     uvStep: vec2f,
 }
-
-@group(0) @binding(0) var texSampler: sampler;
+@group(0) @binding(0) var smp: sampler;
 @group(0) @binding(1) var tex: texture_2d<f32>;
 @group(0) @binding(2) var<uniform> params: Params;
-
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     var col = vec4f(0.0);
-    col += textureSample(tex, texSampler, in.uv) * 4.0;
-    col += textureSample(tex, texSampler, in.uv + params.uvStep * vec2f(-0.5, -0.5));
-    col += textureSample(tex, texSampler, in.uv + params.uvStep * vec2f(-0.5,  0.5));
-    col += textureSample(tex, texSampler, in.uv + params.uvStep * vec2f( 0.5, -0.5));
-    col += textureSample(tex, texSampler, in.uv + params.uvStep * vec2f( 0.5,  0.5));
+    col += textureSample(tex, smp, in.uv) * 4.0;
+    col += textureSample(tex, smp, in.uv + params.uvStep * vec2f(-0.5, -0.5));
+    col += textureSample(tex, smp, in.uv + params.uvStep * vec2f(-0.5,  0.5));
+    col += textureSample(tex, smp, in.uv + params.uvStep * vec2f( 0.5, -0.5));
+    col += textureSample(tex, smp, in.uv + params.uvStep * vec2f( 0.5,  0.5));
     return col / 8.0;
 }
 `;
@@ -381,22 +359,20 @@ const DK_UPSAMPLE_SHADER = FULLSCREEN_VERTEX_SHADER + `
 struct Params {
     uvStep: vec2f,
 }
-
-@group(0) @binding(0) var texSampler: sampler;
+@group(0) @binding(0) var smp: sampler;
 @group(0) @binding(1) var tex: texture_2d<f32>;
 @group(0) @binding(2) var<uniform> params: Params;
-
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     var col = vec4f(0.0);
-    col += textureSample(tex, texSampler, in.uv + params.uvStep * vec2f( 0.0, -1.0));
-    col += textureSample(tex, texSampler, in.uv + params.uvStep * vec2f( 0.0,  1.0));
-    col += textureSample(tex, texSampler, in.uv + params.uvStep * vec2f(-1.0,  0.0));
-    col += textureSample(tex, texSampler, in.uv + params.uvStep * vec2f( 1.0,  0.0));
-    col += textureSample(tex, texSampler, in.uv + params.uvStep * vec2f(-0.5, -0.5)) * 2.0;
-    col += textureSample(tex, texSampler, in.uv + params.uvStep * vec2f(-0.5,  0.5)) * 2.0;
-    col += textureSample(tex, texSampler, in.uv + params.uvStep * vec2f( 0.5, -0.5)) * 2.0;
-    col += textureSample(tex, texSampler, in.uv + params.uvStep * vec2f( 0.5,  0.5)) * 2.0;
+    col += textureSample(tex, smp, in.uv + params.uvStep * vec2f( 0.0, -1.0));
+    col += textureSample(tex, smp, in.uv + params.uvStep * vec2f( 0.0,  1.0));
+    col += textureSample(tex, smp, in.uv + params.uvStep * vec2f(-1.0,  0.0));
+    col += textureSample(tex, smp, in.uv + params.uvStep * vec2f( 1.0,  0.0));
+    col += textureSample(tex, smp, in.uv + params.uvStep * vec2f(-0.5, -0.5)) * 2.0;
+    col += textureSample(tex, smp, in.uv + params.uvStep * vec2f(-0.5,  0.5)) * 2.0;
+    col += textureSample(tex, smp, in.uv + params.uvStep * vec2f( 0.5, -0.5)) * 2.0;
+    col += textureSample(tex, smp, in.uv + params.uvStep * vec2f( 0.5,  0.5)) * 2.0;
     return col / 12.0;
 }
 `;
@@ -405,14 +381,12 @@ const DK_MIX_SHADER = FULLSCREEN_VERTEX_SHADER + `
 struct Params {
     ratio: f32,
 }
-
-@group(0) @binding(0) var texSampler: sampler;
+@group(0) @binding(0) var smp: sampler;
 @group(0) @binding(1) var tex: texture_2d<f32>;
 @group(0) @binding(2) var<uniform> params: Params;
-
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    let col = textureSample(tex, texSampler, in.uv);
+    let col = textureSample(tex, smp, in.uv);
     return vec4f(col.rgb, params.ratio);
 }
 `;
@@ -426,44 +400,36 @@ struct Params {
     w15: f32,
     w20: f32,
 }
-
-@group(0) @binding(0) var texSampler: sampler;
+@group(0) @binding(0) var smp: sampler;
 @group(0) @binding(1) var tex: texture_2d<f32>;
 @group(0) @binding(2) var<uniform> params: Params;
-
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     var col = vec4f(0.0);
-    let st = params.uvStep;
-    col += textureSample(tex, texSampler, in.uv) * params.w00;
-    col += textureSample(tex, texSampler, in.uv + st * (-0.5)) * params.w05;
-    col += textureSample(tex, texSampler, in.uv + st * ( 0.5)) * params.w05;
-    col += textureSample(tex, texSampler, in.uv + st * (-1.0)) * params.w10;
-    col += textureSample(tex, texSampler, in.uv + st * ( 1.0)) * params.w10;
-    col += textureSample(tex, texSampler, in.uv + st * (-1.5)) * params.w15;
-    col += textureSample(tex, texSampler, in.uv + st * ( 1.5)) * params.w15;
-    col += textureSample(tex, texSampler, in.uv + st * (-2.0)) * params.w20;
-    col += textureSample(tex, texSampler, in.uv + st * ( 2.0)) * params.w20;
-    // Normalize by sum of weights
-    let weightSum = params.w00 + (params.w05 + params.w10 + params.w15 + params.w20) * 2.0;
-    return col / weightSum;
+    col += textureSample(tex, smp, in.uv) * params.w00;
+    col += textureSample(tex, smp, in.uv + params.uvStep * (-0.5)) * params.w05;
+    col += textureSample(tex, smp, in.uv + params.uvStep * ( 0.5)) * params.w05;
+    col += textureSample(tex, smp, in.uv + params.uvStep * (-1.0)) * params.w10;
+    col += textureSample(tex, smp, in.uv + params.uvStep * ( 1.0)) * params.w10;
+    col += textureSample(tex, smp, in.uv + params.uvStep * (-1.5)) * params.w15;
+    col += textureSample(tex, smp, in.uv + params.uvStep * ( 1.5)) * params.w15;
+    col += textureSample(tex, smp, in.uv + params.uvStep * (-2.0)) * params.w20;
+    col += textureSample(tex, smp, in.uv + params.uvStep * ( 2.0)) * params.w20;
+    let wsum = params.w00 + (params.w05 + params.w10 + params.w15 + params.w20) * 2.0;
+    return col / wsum;
 }
 `;
 
-// Compute shader for RMSE calculation
 const RMSE_COMPUTE_SHADER = `
-const GRP_SIZE: u32 = 16u;
-
 struct Params {
     numGroupsX: u32,
 }
-
 @group(0) @binding(0) var tex1: texture_2d<f32>;
 @group(0) @binding(1) var tex2: texture_2d<f32>;
 @group(0) @binding(2) var<storage, read_write> rmseOut: array<f32>;
 @group(0) @binding(3) var<uniform> params: Params;
 
-var<workgroup> sharedData: array<f32, 256>; // GRP_SIZE * GRP_SIZE
+var<workgroup> sharedData: array<f32, 256>;
 
 @compute @workgroup_size(16, 16)
 fn main(
@@ -473,7 +439,7 @@ fn main(
 ) {
     let texSize = textureDimensions(tex1);
     let pixelCoord = vec2i(globalId.xy);
-    let localIndex = localId.y * GRP_SIZE + localId.x;
+    let localIndex = localId.y * 16 + localId.x;
 
     // Load pixels, compute squared diff, store in shared memory
     var squaredDiff: f32 = 0.0;
@@ -502,25 +468,24 @@ fn main(
 }
 `;
 
-// ============================================================================
-// WebGPU State
-// ============================================================================
+// ================ WebGPU state
 
-let device = null;
-let context = null;
-let canvasFormat = null;
-let passthroughPipeline = null;
-let separablePipeline = null;
-let dkDownPipeline = null;
-let dkUpPipeline = null;
-let dkMixPipeline = null;
-let splitKawasePipeline = null;
-let sampler = null;
-let samplerNearest = null;
-let imageTexture = null;
-let blurTempTexture = null;
-let blurOutputTexture = null;
-let bindGroup = null;
+let gpu_device = null;
+let gpu_ctx = null;
+let gpu_canvas_format = null;
+let gpu_sampler_linear = null;
+let gpu_sampler_point = null;
+let gpu_bind_group = null;
+let tex_source = null;
+let tex_blurred = null;
+let tex_blur_tmp = null;
+let pip_display = null;
+let pip_separable = null;
+let pip_dk_down = null;
+let pip_dk_up = null;
+let pip_dk_mix = null;
+let pip_split_kaw = null;
+
 let currentImageSize = { width: 0, height: 0 };
 
 // Reusable resources for Kawase blurs
@@ -536,9 +501,7 @@ let rmseUniformBuffer = null;
 let gaussianRefTexture = null;     // Texture for Gaussian reference blur
 let rmseInProgress = false;        // Guard against concurrent RMSE calculations
 
-// ============================================================================
-// Blur Parameters
-// ============================================================================
+// ================ Blur parameters
 
 const BlurMode = {
     BOX: 'box',
@@ -559,9 +522,7 @@ const blurParams = {
     splitCfgUp:   { w00: 0.000, w05: 2.800, w10: 0.700, w15: 0.000, w20: 0.010 },
 };
 
-// ============================================================================
-// Initialization
-// ============================================================================
+// ================ Initialization
 
 async function initWebGPU() {
     const statusEl = document.getElementById('status');
@@ -580,47 +541,46 @@ async function initWebGPU() {
             return false;
         }
 
-        device = await adapter.requestDevice({
+        gpu_device = await adapter.requestDevice({
             requiredFeatures: ['float32-filterable', 'float32-blendable'],
         });
-        context = canvas.getContext('webgpu');
-        canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+        gpu_ctx = canvas.getContext('webgpu');
+        gpu_canvas_format = navigator.gpu.getPreferredCanvasFormat();
 
-        context.configure({
-            device: device,
-            format: canvasFormat,
+        gpu_ctx.configure({
+            device: gpu_device,
+            format: gpu_canvas_format,
             alphaMode: 'premultiplied',
         });
 
         // Create samplers
-        sampler = device.createSampler({
+        gpu_sampler_linear = gpu_device.createSampler({
             magFilter: 'linear',
             minFilter: 'linear',
             addressModeU: 'clamp-to-edge',
             addressModeV: 'clamp-to-edge',
         });
-        samplerNearest = device.createSampler({
+        gpu_sampler_point = gpu_device.createSampler({
             magFilter: 'nearest',
             minFilter: 'nearest',
             addressModeU: 'clamp-to-edge',
             addressModeV: 'clamp-to-edge',
         });
 
-        // Create passthrough pipeline
-        const passthroughModule = device.createShaderModule({
-            code: PASSTHROUGH_SHADER,
+        const displayModule = gpu_device.createShaderModule({
+            code: DISPLAY_SHADER,
         });
 
-        passthroughPipeline = device.createRenderPipeline({
+        pip_display = gpu_device.createRenderPipeline({
             layout: 'auto',
             vertex: {
-                module: passthroughModule,
+                module: displayModule,
                 entryPoint: 'vs_main',
             },
             fragment: {
-                module: passthroughModule,
+                module: displayModule,
                 entryPoint: 'fs_main',
-                targets: [{ format: canvasFormat }],
+                targets: [{ format: gpu_canvas_format }],
             },
             primitive: {
                 topology: 'triangle-list',
@@ -628,11 +588,11 @@ async function initWebGPU() {
         });
 
         // Create separable blur pipeline
-        const separableModule = device.createShaderModule({
+        const separableModule = gpu_device.createShaderModule({
             code: SEPARABLE_BLUR_SHADER,
         });
 
-        separablePipeline = device.createRenderPipeline({
+        pip_separable = gpu_device.createRenderPipeline({
             layout: 'auto',
             vertex: {
                 module: separableModule,
@@ -649,25 +609,25 @@ async function initWebGPU() {
         });
 
         // Create Dual Kawase pipelines
-        const dkDownModule = device.createShaderModule({ code: DK_DOWNSAMPLE_SHADER });
-        const dkUpModule = device.createShaderModule({ code: DK_UPSAMPLE_SHADER });
-        const dkMixModule = device.createShaderModule({ code: DK_MIX_SHADER });
+        const dkDownModule = gpu_device.createShaderModule({ code: DK_DOWNSAMPLE_SHADER });
+        const dkUpModule = gpu_device.createShaderModule({ code: DK_UPSAMPLE_SHADER });
+        const dkMixModule = gpu_device.createShaderModule({ code: DK_MIX_SHADER });
 
-        dkDownPipeline = device.createRenderPipeline({
+        pip_dk_down = gpu_device.createRenderPipeline({
             layout: 'auto',
             vertex: { module: dkDownModule, entryPoint: 'vs_main' },
             fragment: { module: dkDownModule, entryPoint: 'fs_main', targets: [{ format: 'rgba32float' }] },
             primitive: { topology: 'triangle-list' },
         });
 
-        dkUpPipeline = device.createRenderPipeline({
+        pip_dk_up = gpu_device.createRenderPipeline({
             layout: 'auto',
             vertex: { module: dkUpModule, entryPoint: 'vs_main' },
             fragment: { module: dkUpModule, entryPoint: 'fs_main', targets: [{ format: 'rgba32float' }] },
             primitive: { topology: 'triangle-list' },
         });
 
-        dkMixPipeline = device.createRenderPipeline({
+        pip_dk_mix = gpu_device.createRenderPipeline({
             layout: 'auto',
             vertex: { module: dkMixModule, entryPoint: 'vs_main' },
             fragment: {
@@ -693,8 +653,8 @@ async function initWebGPU() {
         });
 
         // Create Split Kawase pipeline
-        const splitKawaseModule = device.createShaderModule({ code: SPLIT_KAWASE_STEP_SHADER });
-        splitKawasePipeline = device.createRenderPipeline({
+        const splitKawaseModule = gpu_device.createShaderModule({ code: SPLIT_KAWASE_STEP_SHADER });
+        pip_split_kaw = gpu_device.createRenderPipeline({
             layout: 'auto',
             vertex: { module: splitKawaseModule, entryPoint: 'vs_main' },
             fragment: { module: splitKawaseModule, entryPoint: 'fs_main', targets: [{ format: 'rgba32float' }] },
@@ -702,14 +662,14 @@ async function initWebGPU() {
         });
 
         // Create RMSE compute pipeline
-        const rmseModule = device.createShaderModule({ code: RMSE_COMPUTE_SHADER });
-        rmseComputePipeline = device.createComputePipeline({
+        const rmseModule = gpu_device.createShaderModule({ code: RMSE_COMPUTE_SHADER });
+        rmseComputePipeline = gpu_device.createComputePipeline({
             layout: 'auto',
             compute: { module: rmseModule, entryPoint: 'main' },
         });
 
         // Create RMSE uniform buffer (holds numGroupsX)
-        rmseUniformBuffer = device.createBuffer({
+        rmseUniformBuffer = gpu_device.createBuffer({
             size: 4,  // u32
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
@@ -722,9 +682,7 @@ async function initWebGPU() {
     }
 }
 
-// ============================================================================
-// Image Loading
-// ============================================================================
+// ================ Image loading
 
 // sRGB to linear conversion
 function srgbToLinear(value) {
@@ -782,8 +740,8 @@ function createTextureFromLinearData(linearData) {
     const { data, width, height } = linearData;
 
     // Destroy old texture if exists
-    if (imageTexture) {
-        imageTexture.destroy();
+    if (tex_source) {
+        tex_source.destroy();
     }
 
     // Clear cached textures (pyramid sizes depend on image size)
@@ -800,7 +758,7 @@ function createTextureFromLinearData(linearData) {
         rmseReadBuffer.destroy();
     }
 
-    imageTexture = createTexture2D(width, height);
+    tex_source = createTexture2D(width, height);
 
     // Create Gaussian reference texture for RMSE calculation
     gaussianRefTexture = createTexture2D(width, height);
@@ -811,29 +769,29 @@ function createTextureFromLinearData(linearData) {
     const numGroups = numGroupsX * numGroupsY;
     const bufferSize = numGroups * 4;  // 4 bytes per f32
 
-    rmseResultBuffer = device.createBuffer({
+    rmseResultBuffer = gpu_device.createBuffer({
         size: bufferSize,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
 
-    rmseReadBuffer = device.createBuffer({
+    rmseReadBuffer = gpu_device.createBuffer({
         size: bufferSize,
         usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
     });
 
-    device.queue.writeTexture(
-        { texture: imageTexture },
+    gpu_device.queue.writeTexture(
+        { texture: tex_source },
         data,
         { bytesPerRow: width * 4 * 4 },
         { width, height }
     );
 
     // Create bind group
-    bindGroup = device.createBindGroup({
-        layout: passthroughPipeline.getBindGroupLayout(0),
+    gpu_bind_group = gpu_device.createBindGroup({
+        layout: pip_display.getBindGroupLayout(0),
         entries: [
-            { binding: 0, resource: sampler },
-            { binding: 1, resource: imageTexture.createView() },
+            { binding: 0, resource: gpu_sampler_linear },
+            { binding: 1, resource: tex_source.createView() },
         ],
     });
 
@@ -885,9 +843,9 @@ async function handleImageFile(file) {
         // Resize canvas to match image (internal resolution)
         canvas.width = width;
         canvas.height = height;
-        context.configure({
-            device: device,
-            format: canvasFormat,
+        gpu_ctx.configure({
+            device: gpu_device,
+            format: gpu_canvas_format,
             alphaMode: 'premultiplied',
         });
 
@@ -906,9 +864,7 @@ async function handleImageFile(file) {
     }
 }
 
-// ============================================================================
-// Blur Kernel Calculation
-// ============================================================================
+// ================ Blur kernel utilities
 
 function separableKernelValue(mode, x) {
     x = Math.abs(x);
@@ -955,14 +911,14 @@ function calcSeparableWeights(mode, radius) {
     }
 
     // Create 1D texture for kernel weights
-    const kernelTexture = device.createTexture({
+    const kernelTexture = gpu_device.createTexture({
         size: [size],
         format: 'r32float',
         dimension: '1d',
         usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
 
-    device.queue.writeTexture(
+    gpu_device.queue.writeTexture(
         { texture: kernelTexture },
         weights,
         { bytesPerRow: size * 4 },
@@ -986,17 +942,17 @@ function separablePass(commandEncoder, input, output, mode, horizontal, radius) 
     paramsView.setFloat32(4, horizontal ? 0.0 : 1.0 / height, true);
     paramsView.setInt32(8, kernel.width, true);
 
-    const paramsBuffer = device.createBuffer({
+    const paramsBuffer = gpu_device.createBuffer({
         size: 16,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
-    device.queue.writeBuffer(paramsBuffer, 0, paramsData);
+    gpu_device.queue.writeBuffer(paramsBuffer, 0, paramsData);
 
     // Create bind group for this pass
-    const blurBindGroup = device.createBindGroup({
-        layout: separablePipeline.getBindGroupLayout(0),
+    const blurBindGroup = gpu_device.createBindGroup({
+        layout: pip_separable.getBindGroupLayout(0),
         entries: [
-            { binding: 0, resource: sampler },
+            { binding: 0, resource: gpu_sampler_linear },
             { binding: 1, resource: input.createView() },
             { binding: 2, resource: kernel.texture.createView() },
             { binding: 3, resource: { buffer: paramsBuffer } },
@@ -1012,7 +968,7 @@ function separablePass(commandEncoder, input, output, mode, horizontal, radius) 
         }],
     });
 
-    renderPass.setPipeline(separablePipeline);
+    renderPass.setPipeline(pip_separable);
     renderPass.setBindGroup(0, blurBindGroup);
     renderPass.draw(3);
     renderPass.end();
@@ -1022,37 +978,51 @@ function separablePass(commandEncoder, input, output, mode, horizontal, radius) 
 
 function ensureBlurTextures(width, height) {
     // Create or recreate temp and output textures if size changed
-    if (blurTempTexture && blurTempTexture.width === width && blurTempTexture.height === height) {
+    if (tex_blur_tmp && tex_blur_tmp.width === width && tex_blur_tmp.height === height) {
         return;
     }
 
-    if (blurTempTexture) blurTempTexture.destroy();
-    if (blurOutputTexture) blurOutputTexture.destroy();
+    if (tex_blur_tmp) tex_blur_tmp.destroy();
+    if (tex_blurred) tex_blurred.destroy();
 
-    blurTempTexture = createTexture2D(width, height);
-    blurOutputTexture = createTexture2D(width, height);
+    tex_blur_tmp = createTexture2D(width, height);
+    tex_blurred = createTexture2D(width, height);
 }
 
-// ============================================================================
-// Texture Helpers
-// ============================================================================
+// ================ Various helpers
 
 function createTexture2D(width, height) {
-    return device.createTexture({
+    return gpu_device.createTexture({
         size: [width, height],
         format: 'rgba32float',
         usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
     });
 }
 
-// ============================================================================
-// Dual Kawase Blur
-// ============================================================================
+function fitCanvasToViewport(imageWidth, imageHeight) {
+    const canvas = document.getElementById('canvas');
+    const margin = 40; // pixels of margin around canvas
+
+    // Available space (viewport minus controls and margins)
+    const controlsHeight = document.querySelector('.controls').offsetHeight;
+    const maxWidth = window.innerWidth - margin * 2;
+    const maxHeight = window.innerHeight - controlsHeight - margin * 3;
+
+    // Calculate scale to fit
+    const scaleX = maxWidth / imageWidth;
+    const scaleY = maxHeight / imageHeight;
+    const scale = Math.min(scaleX, scaleY, 1.0); // Never upscale
+
+    canvas.style.width = Math.floor(imageWidth * scale) + 'px';
+    canvas.style.height = Math.floor(imageHeight * scale) + 'px';
+}
+
+// ================ Dual Kawase blur
 
 // Get a uniform buffer from pool (creates if needed)
 function getKawaseUniformBuffer(size) {
     if (kawaseUniformBufferIndex >= kawaseUniformBuffers.length) {
-        kawaseUniformBuffers.push(device.createBuffer({
+        kawaseUniformBuffers.push(gpu_device.createBuffer({
             size: 32,  // Max size needed (Split Kawase params)
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         }));
@@ -1116,12 +1086,12 @@ function kawaseDownsample(commandEncoder, input, fullSizeX, fullSizeY, divisor, 
 
     const paramsData = new Float32Array([stepX, stepY]);
     const paramsBuffer = getKawaseUniformBuffer();
-    device.queue.writeBuffer(paramsBuffer, 0, paramsData);
+    gpu_device.queue.writeBuffer(paramsBuffer, 0, paramsData);
 
-    const bindGroup = device.createBindGroup({
-        layout: dkDownPipeline.getBindGroupLayout(0),
+    const bindGroup = gpu_device.createBindGroup({
+        layout: pip_dk_down.getBindGroupLayout(0),
         entries: [
-            { binding: 0, resource: sampler },
+            { binding: 0, resource: gpu_sampler_linear },
             { binding: 1, resource: input.createView() },
             { binding: 2, resource: { buffer: paramsBuffer } },
         ],
@@ -1136,7 +1106,7 @@ function kawaseDownsample(commandEncoder, input, fullSizeX, fullSizeY, divisor, 
         }],
     });
 
-    renderPass.setPipeline(dkDownPipeline);
+    renderPass.setPipeline(pip_dk_down);
     renderPass.setBindGroup(0, bindGroup);
     renderPass.draw(3);
     renderPass.end();
@@ -1155,12 +1125,12 @@ function kawaseUpsample(commandEncoder, input, fullSizeX, fullSizeY, divisor, ra
 
     const paramsData = new Float32Array([stepX, stepY]);
     const paramsBuffer = getKawaseUniformBuffer();
-    device.queue.writeBuffer(paramsBuffer, 0, paramsData);
+    gpu_device.queue.writeBuffer(paramsBuffer, 0, paramsData);
 
-    const bindGroup = device.createBindGroup({
-        layout: dkUpPipeline.getBindGroupLayout(0),
+    const bindGroup = gpu_device.createBindGroup({
+        layout: pip_dk_up.getBindGroupLayout(0),
         entries: [
-            { binding: 0, resource: sampler },
+            { binding: 0, resource: gpu_sampler_linear },
             { binding: 1, resource: input.createView() },
             { binding: 2, resource: { buffer: paramsBuffer } },
         ],
@@ -1175,7 +1145,7 @@ function kawaseUpsample(commandEncoder, input, fullSizeX, fullSizeY, divisor, ra
         }],
     });
 
-    renderPass.setPipeline(dkUpPipeline);
+    renderPass.setPipeline(pip_dk_up);
     renderPass.setBindGroup(0, bindGroup);
     renderPass.draw(3);
     renderPass.end();
@@ -1186,12 +1156,12 @@ function kawaseUpsample(commandEncoder, input, fullSizeX, fullSizeY, divisor, ra
 function kawaseMix(commandEncoder, input, output, ratio) {
     const paramsData = new Float32Array([ratio]);
     const paramsBuffer = getKawaseUniformBuffer();
-    device.queue.writeBuffer(paramsBuffer, 0, paramsData);
+    gpu_device.queue.writeBuffer(paramsBuffer, 0, paramsData);
 
-    const bindGroup = device.createBindGroup({
-        layout: dkMixPipeline.getBindGroupLayout(0),
+    const bindGroup = gpu_device.createBindGroup({
+        layout: pip_dk_mix.getBindGroupLayout(0),
         entries: [
-            { binding: 0, resource: samplerNearest },
+            { binding: 0, resource: gpu_sampler_point },
             { binding: 1, resource: input.createView() },
             { binding: 2, resource: { buffer: paramsBuffer } },
         ],
@@ -1205,7 +1175,7 @@ function kawaseMix(commandEncoder, input, output, ratio) {
         }],
     });
 
-    renderPass.setPipeline(dkMixPipeline);
+    renderPass.setPipeline(pip_dk_mix);
     renderPass.setBindGroup(0, bindGroup);
     renderPass.draw(3);
     renderPass.end();
@@ -1270,9 +1240,7 @@ function blurDualKawase(commandEncoder, input, output) {
     }
 }
 
-// ============================================================================
-// Split Kawase Blur
-// ============================================================================
+// ================ Split Kawase blur
 
 function splitKawaseStep(commandEncoder, cfg, input, fullSizeX, fullSizeY, divisor, horizontal) {
     const sizeX = horizontal ? Math.max(Math.floor(fullSizeX / divisor), 1) : fullSizeX;
@@ -1286,12 +1254,12 @@ function splitKawaseStep(commandEncoder, cfg, input, fullSizeX, fullSizeY, divis
     // Params: uvStep (vec2f = 8 bytes) + w00, w05, w10, w15, w20 (5 * f32 = 20 bytes) = 28 bytes, padded to 32
     const paramsData = new Float32Array([stepX, stepY, cfg.w00, cfg.w05, cfg.w10, cfg.w15, cfg.w20, 0.0]);
     const paramsBuffer = getKawaseUniformBuffer();
-    device.queue.writeBuffer(paramsBuffer, 0, paramsData);
+    gpu_device.queue.writeBuffer(paramsBuffer, 0, paramsData);
 
-    const bindGroup = device.createBindGroup({
-        layout: splitKawasePipeline.getBindGroupLayout(0),
+    const bindGroup = gpu_device.createBindGroup({
+        layout: pip_split_kaw.getBindGroupLayout(0),
         entries: [
-            { binding: 0, resource: sampler },
+            { binding: 0, resource: gpu_sampler_linear },
             { binding: 1, resource: input.createView() },
             { binding: 2, resource: { buffer: paramsBuffer } },
         ],
@@ -1306,7 +1274,7 @@ function splitKawaseStep(commandEncoder, cfg, input, fullSizeX, fullSizeY, divis
         }],
     });
 
-    renderPass.setPipeline(splitKawasePipeline);
+    renderPass.setPipeline(pip_split_kaw);
     renderPass.setBindGroup(0, bindGroup);
     renderPass.draw(3);
     renderPass.end();
@@ -1367,34 +1335,10 @@ function blurSplitKawase(commandEncoder, input, output) {
         tmp, output, blurParams.radiusY, false);
 }
 
-// ============================================================================
-// Canvas Sizing
-// ============================================================================
-
-function fitCanvasToViewport(imageWidth, imageHeight) {
-    const canvas = document.getElementById('canvas');
-    const margin = 40; // pixels of margin around canvas
-
-    // Available space (viewport minus controls and margins)
-    const controlsHeight = document.querySelector('.controls').offsetHeight;
-    const maxWidth = window.innerWidth - margin * 2;
-    const maxHeight = window.innerHeight - controlsHeight - margin * 3;
-
-    // Calculate scale to fit
-    const scaleX = maxWidth / imageWidth;
-    const scaleY = maxHeight / imageHeight;
-    const scale = Math.min(scaleX, scaleY, 1.0); // Never upscale
-
-    canvas.style.width = Math.floor(imageWidth * scale) + 'px';
-    canvas.style.height = Math.floor(imageHeight * scale) + 'px';
-}
-
-// ============================================================================
-// Rendering
-// ============================================================================
+// ================ Rendering
 
 async function render() {
-    if (!device || !imageTexture) return;
+    if (!gpu_device || !tex_source) return;
 
     const { width, height } = currentImageSize;
     if (width === 0 || height === 0) return;
@@ -1406,35 +1350,35 @@ async function render() {
     resetKawaseUniformBufferPool();
     resetTextureCache();
 
-    const commandEncoder = device.createCommandEncoder();
+    const commandEncoder = gpu_device.createCommandEncoder();
 
     // Determine which texture to display
-    let textureToDisplay = imageTexture;
+    let textureToDisplay = tex_source;
 
     // Apply blur if radius > 0
     if (blurParams.radiusX > 0 || blurParams.radiusY > 0) {
         if (blurParams.mode === BlurMode.DUAL_KAWASE) {
             // Dual Kawase blur
-            blurDualKawase(commandEncoder, imageTexture, blurOutputTexture);
-            textureToDisplay = blurOutputTexture;
+            blurDualKawase(commandEncoder, tex_source, tex_blurred);
+            textureToDisplay = tex_blurred;
         } else if (blurParams.mode === BlurMode.SPLIT_KAWASE) {
             // Split Kawase blur
-            blurSplitKawase(commandEncoder, imageTexture, blurOutputTexture);
-            textureToDisplay = blurOutputTexture;
+            blurSplitKawase(commandEncoder, tex_source, tex_blurred);
+            textureToDisplay = tex_blurred;
         } else {
             // Separable blur (Box, Tent, Gaussian)
             // Horizontal pass: input -> temp
             if (blurParams.radiusX > 0) {
-                separablePass(commandEncoder, imageTexture, blurTempTexture, blurParams.mode, true, blurParams.radiusX);
+                separablePass(commandEncoder, tex_source, tex_blur_tmp, blurParams.mode, true, blurParams.radiusX);
             }
 
             // Vertical pass: temp -> output (or input -> output if no horizontal)
             if (blurParams.radiusY > 0) {
-                const vertInput = blurParams.radiusX > 0 ? blurTempTexture : imageTexture;
-                separablePass(commandEncoder, vertInput, blurOutputTexture, blurParams.mode, false, blurParams.radiusY);
-                textureToDisplay = blurOutputTexture;
+                const vertInput = blurParams.radiusX > 0 ? tex_blur_tmp : tex_source;
+                separablePass(commandEncoder, vertInput, tex_blurred, blurParams.mode, false, blurParams.radiusY);
+                textureToDisplay = tex_blurred;
             } else {
-                textureToDisplay = blurTempTexture;
+                textureToDisplay = tex_blur_tmp;
             }
         }
     }
@@ -1443,10 +1387,10 @@ async function render() {
     let shouldCalcRmse = blurParams.calcRmse;
 
     // Create bind group for final display
-    const displayBindGroup = device.createBindGroup({
-        layout: passthroughPipeline.getBindGroupLayout(0),
+    const displayBindGroup = gpu_device.createBindGroup({
+        layout: pip_display.getBindGroupLayout(0),
         entries: [
-            { binding: 0, resource: sampler },
+            { binding: 0, resource: gpu_sampler_linear },
             { binding: 1, resource: textureToDisplay.createView() },
         ],
     });
@@ -1454,19 +1398,19 @@ async function render() {
     // Final pass: render to screen with sRGB conversion
     const renderPass = commandEncoder.beginRenderPass({
         colorAttachments: [{
-            view: context.getCurrentTexture().createView(),
+            view: gpu_ctx.getCurrentTexture().createView(),
             clearValue: { r: 0, g: 0, b: 0, a: 1 },
             loadOp: 'clear',
             storeOp: 'store',
         }],
     });
 
-    renderPass.setPipeline(passthroughPipeline);
+    renderPass.setPipeline(pip_display);
     renderPass.setBindGroup(0, displayBindGroup);
     renderPass.draw(3);
     renderPass.end();
 
-    device.queue.submit([commandEncoder.finish()]);
+    gpu_device.queue.submit([commandEncoder.finish()]);
 
     // Calculate RMSE if enabled (skip if already in progress)
     if (shouldCalcRmse && !rmseInProgress) {
@@ -1478,27 +1422,27 @@ async function render() {
             resetTextureCache();
 
             // Calculate Gaussian blur into reference texture
-            const gaussEncoder = device.createCommandEncoder();
+            const gaussEncoder = gpu_device.createCommandEncoder();
 
             // Horizontal pass: input -> temp
             if (blurParams.radiusX > 0) {
-                separablePass(gaussEncoder, imageTexture, blurTempTexture, BlurMode.GAUSSIAN, true, blurParams.radiusX);
+                separablePass(gaussEncoder, tex_source, tex_blur_tmp, BlurMode.GAUSSIAN, true, blurParams.radiusX);
             }
 
             // Vertical pass: temp -> gaussianRef (or input -> gaussianRef if no horizontal)
             if (blurParams.radiusY > 0) {
-                const vertInput = blurParams.radiusX > 0 ? blurTempTexture : imageTexture;
+                const vertInput = blurParams.radiusX > 0 ? tex_blur_tmp : tex_source;
                 separablePass(gaussEncoder, vertInput, gaussianRefTexture, BlurMode.GAUSSIAN, false, blurParams.radiusY);
             } else if (blurParams.radiusX > 0) {
                 // Copy temp to gaussianRef if only horizontal blur
                 gaussEncoder.copyTextureToTexture(
-                    { texture: blurTempTexture },
+                    { texture: tex_blur_tmp },
                     { texture: gaussianRefTexture },
                     [width, height]
                 );
             }
 
-            device.queue.submit([gaussEncoder.finish()]);
+            gpu_device.queue.submit([gaussEncoder.finish()]);
 
             await calculateAndDisplayRMSE(width, height);
         } finally {
@@ -1513,20 +1457,20 @@ async function calculateAndDisplayRMSE(width, height) {
     const numGroups = numGroupsX * numGroupsY;
 
     // Update uniform buffer with numGroupsX
-    device.queue.writeBuffer(rmseUniformBuffer, 0, new Uint32Array([numGroupsX]));
+    gpu_device.queue.writeBuffer(rmseUniformBuffer, 0, new Uint32Array([numGroupsX]));
 
     // Create compute bind group
-    const computeBindGroup = device.createBindGroup({
+    const computeBindGroup = gpu_device.createBindGroup({
         layout: rmseComputePipeline.getBindGroupLayout(0),
         entries: [
             { binding: 0, resource: gaussianRefTexture.createView() },
-            { binding: 1, resource: blurOutputTexture.createView() },
+            { binding: 1, resource: tex_blurred.createView() },
             { binding: 2, resource: { buffer: rmseResultBuffer } },
             { binding: 3, resource: { buffer: rmseUniformBuffer } },
         ],
     });
 
-    const commandEncoder = device.createCommandEncoder();
+    const commandEncoder = gpu_device.createCommandEncoder();
 
     // Dispatch compute shader
     const computePass = commandEncoder.beginComputePass();
@@ -1542,7 +1486,7 @@ async function calculateAndDisplayRMSE(width, height) {
         numGroups * 4
     );
 
-    device.queue.submit([commandEncoder.finish()]);
+    gpu_device.queue.submit([commandEncoder.finish()]);
 
     // Map and read the staging buffer
     await rmseReadBuffer.mapAsync(GPUMapMode.READ);
@@ -1563,9 +1507,7 @@ async function calculateAndDisplayRMSE(width, height) {
     document.getElementById('rmseDisplay').textContent = `RMSE: ${rmse.toFixed(6)}`;
 }
 
-// ============================================================================
-// Event Handlers
-// ============================================================================
+// ================ Event handlers
 
 function setupEventHandlers() {
     const dropzone = document.getElementById('dropzone');
