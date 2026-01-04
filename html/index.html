@@ -486,20 +486,20 @@ let pip_dk_up = null;
 let pip_dk_mix = null;
 let pip_split_kaw = null;
 
-let currentImageSize = { width: 0, height: 0 };
+let cur_image_size = { width: 0, height: 0 };
 
 // Reusable resources for Kawase blurs
 let kawaseUniformBuffers = [];  // Pool of uniform buffers
 let kawaseUniformBufferIndex = 0;
 let kawaseTextureCache = new Map();  // Cache textures by "width,height" key
 
-// RMSE calculation resources
-let rmseComputePipeline = null;
-let rmseResultBuffer = null;       // GPU storage buffer for workgroup results
-let rmseReadBuffer = null;         // Staging buffer for readback
-let rmseUniformBuffer = null;
-let gaussianRefTexture = null;     // Texture for Gaussian reference blur
-let rmseInProgress = false;        // Guard against concurrent RMSE calculations
+// RMSE calculation
+let rmse_pip = null;
+let rmse_buf_result = null;
+let rmse_buf_read = null;
+let rmse_buf_ubo = null;
+let tex_blurred_ref = null;
+let rmse_in_progress = false;
 
 // ================ Blur parameters
 
@@ -511,15 +511,15 @@ const BlurMode = {
     SPLIT_KAWASE: 'split_kawase',
 };
 
-const blurParams = {
+const blur_params = {
     mode: BlurMode.BOX,
-    radiusX: 10,
-    radiusY: 10,
-    lockRadius: true,
-    calcRmse: false,
-    // Split Kawase filter configs (matching C++ defaults)
-    splitCfgDown: { w00: 2.120, w05: 0.750, w10: 1.300, w15: 0.100, w20: 0.150 },
-    splitCfgUp:   { w00: 0.000, w05: 2.800, w10: 0.700, w15: 0.000, w20: 0.010 },
+    radius_x: 10,
+    radius_y: 10,
+    lock_radius: true,
+    calc_rmse: false,
+    // Split Kawase filter configs
+    split_cfg_down: { w00: 2.120, w05: 0.750, w10: 1.300, w15: 0.100, w20: 0.150 },
+    split_cfg_up:   { w00: 0.000, w05: 2.800, w10: 0.700, w15: 0.000, w20: 0.010 },
 };
 
 // ================ Initialization
@@ -663,13 +663,13 @@ async function initWebGPU() {
 
         // Create RMSE compute pipeline
         const rmseModule = gpu_device.createShaderModule({ code: RMSE_COMPUTE_SHADER });
-        rmseComputePipeline = gpu_device.createComputePipeline({
+        rmse_pip = gpu_device.createComputePipeline({
             layout: 'auto',
             compute: { module: rmseModule, entryPoint: 'main' },
         });
 
         // Create RMSE uniform buffer (holds numGroupsX)
-        rmseUniformBuffer = gpu_device.createBuffer({
+        rmse_buf_ubo = gpu_device.createBuffer({
             size: 4,  // u32
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
@@ -748,20 +748,20 @@ function createTextureFromLinearData(linearData) {
     clearTextureCache();
 
     // Destroy old RMSE resources
-    if (gaussianRefTexture) {
-        gaussianRefTexture.destroy();
+    if (tex_blurred_ref) {
+        tex_blurred_ref.destroy();
     }
-    if (rmseResultBuffer) {
-        rmseResultBuffer.destroy();
+    if (rmse_buf_result) {
+        rmse_buf_result.destroy();
     }
-    if (rmseReadBuffer) {
-        rmseReadBuffer.destroy();
+    if (rmse_buf_read) {
+        rmse_buf_read.destroy();
     }
 
     tex_source = createTexture2D(width, height);
 
     // Create Gaussian reference texture for RMSE calculation
-    gaussianRefTexture = createTexture2D(width, height);
+    tex_blurred_ref = createTexture2D(width, height);
 
     // Create RMSE result buffers - one f32 per workgroup
     const numGroupsX = Math.ceil(width / 16);
@@ -769,12 +769,12 @@ function createTextureFromLinearData(linearData) {
     const numGroups = numGroupsX * numGroupsY;
     const bufferSize = numGroups * 4;  // 4 bytes per f32
 
-    rmseResultBuffer = gpu_device.createBuffer({
+    rmse_buf_result = gpu_device.createBuffer({
         size: bufferSize,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
 
-    rmseReadBuffer = gpu_device.createBuffer({
+    rmse_buf_read = gpu_device.createBuffer({
         size: bufferSize,
         usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
     });
@@ -850,7 +850,7 @@ async function handleImageFile(file) {
         });
 
         // Store size and constrain display to fit viewport
-        currentImageSize = { width, height };
+        cur_image_size = { width, height };
         fitCanvasToViewport(width, height);
 
         // Render
@@ -929,8 +929,8 @@ function calcSeparableWeights(mode, radius) {
 }
 
 function separablePass(commandEncoder, input, output, mode, horizontal, radius) {
-    const width = currentImageSize.width;
-    const height = currentImageSize.height;
+    const width = cur_image_size.width;
+    const height = cur_image_size.height;
 
     // Calculate kernel weights
     const kernel = calcSeparableWeights(mode, radius);
@@ -1191,7 +1191,7 @@ function kawaseCopy(commandEncoder, input, output) {
 
 function blurDualKawase(commandEncoder, input, output) {
     // Dual Kawase is isotropic, so blur based on max(x,y)
-    const radius = Math.max(blurParams.radiusX, blurParams.radiusY);
+    const radius = Math.max(blur_params.radius_x, blur_params.radius_y);
 
     // Amount of Kawase "steps" to do; this more or less matches the blur amount of Gaussian
     const numSteps = radius / 3.0;
@@ -1200,8 +1200,8 @@ function blurDualKawase(commandEncoder, input, output) {
         return;
     }
 
-    const fullSizeX = currentImageSize.width;
-    const fullSizeY = currentImageSize.height;
+    const fullSizeX = cur_image_size.width;
+    const fullSizeY = cur_image_size.height;
 
     let curr = input;
 
@@ -1286,8 +1286,8 @@ function splitKawaseAxis(commandEncoder, cfgDown, cfgUp, input, output, radius, 
     // Amount of Kawase "steps" to do; this more or less matches the blur amount of Gaussian
     const numSteps = radius / 3.0;
 
-    const fullSizeX = currentImageSize.width;
-    const fullSizeY = currentImageSize.height;
+    const fullSizeX = cur_image_size.width;
+    const fullSizeY = cur_image_size.height;
 
     let curr = input;
 
@@ -1324,15 +1324,15 @@ function splitKawaseAxis(commandEncoder, cfgDown, cfgUp, input, output, radius, 
 
 function blurSplitKawase(commandEncoder, input, output) {
     // Get temp texture for intermediate result between X and Y passes
-    const tmp = getCachedTexture(currentImageSize.width, currentImageSize.height);
+    const tmp = getCachedTexture(cur_image_size.width, cur_image_size.height);
 
     // Horizontal pass: input -> tmp
-    splitKawaseAxis(commandEncoder, blurParams.splitCfgDown, blurParams.splitCfgUp,
-        input, tmp, blurParams.radiusX, true);
+    splitKawaseAxis(commandEncoder, blur_params.split_cfg_down, blur_params.split_cfg_up,
+        input, tmp, blur_params.radius_x, true);
 
     // Vertical pass: tmp -> output
-    splitKawaseAxis(commandEncoder, blurParams.splitCfgDown, blurParams.splitCfgUp,
-        tmp, output, blurParams.radiusY, false);
+    splitKawaseAxis(commandEncoder, blur_params.split_cfg_down, blur_params.split_cfg_up,
+        tmp, output, blur_params.radius_y, false);
 }
 
 // ================ Rendering
@@ -1340,7 +1340,7 @@ function blurSplitKawase(commandEncoder, input, output) {
 async function render() {
     if (!gpu_device || !tex_source) return;
 
-    const { width, height } = currentImageSize;
+    const { width, height } = cur_image_size;
     if (width === 0 || height === 0) return;
 
     // Ensure blur textures exist
@@ -1356,26 +1356,26 @@ async function render() {
     let textureToDisplay = tex_source;
 
     // Apply blur if radius > 0
-    if (blurParams.radiusX > 0 || blurParams.radiusY > 0) {
-        if (blurParams.mode === BlurMode.DUAL_KAWASE) {
+    if (blur_params.radius_x > 0 || blur_params.radius_y > 0) {
+        if (blur_params.mode === BlurMode.DUAL_KAWASE) {
             // Dual Kawase blur
             blurDualKawase(commandEncoder, tex_source, tex_blurred);
             textureToDisplay = tex_blurred;
-        } else if (blurParams.mode === BlurMode.SPLIT_KAWASE) {
+        } else if (blur_params.mode === BlurMode.SPLIT_KAWASE) {
             // Split Kawase blur
             blurSplitKawase(commandEncoder, tex_source, tex_blurred);
             textureToDisplay = tex_blurred;
         } else {
             // Separable blur (Box, Tent, Gaussian)
             // Horizontal pass: input -> temp
-            if (blurParams.radiusX > 0) {
-                separablePass(commandEncoder, tex_source, tex_blur_tmp, blurParams.mode, true, blurParams.radiusX);
+            if (blur_params.radius_x > 0) {
+                separablePass(commandEncoder, tex_source, tex_blur_tmp, blur_params.mode, true, blur_params.radius_x);
             }
 
             // Vertical pass: temp -> output (or input -> output if no horizontal)
-            if (blurParams.radiusY > 0) {
-                const vertInput = blurParams.radiusX > 0 ? tex_blur_tmp : tex_source;
-                separablePass(commandEncoder, vertInput, tex_blurred, blurParams.mode, false, blurParams.radiusY);
+            if (blur_params.radius_y > 0) {
+                const vertInput = blur_params.radius_x > 0 ? tex_blur_tmp : tex_source;
+                separablePass(commandEncoder, vertInput, tex_blurred, blur_params.mode, false, blur_params.radius_y);
                 textureToDisplay = tex_blurred;
             } else {
                 textureToDisplay = tex_blur_tmp;
@@ -1384,7 +1384,7 @@ async function render() {
     }
 
     // RMSE calculation
-    let shouldCalcRmse = blurParams.calcRmse;
+    let shouldCalcRmse = blur_params.calc_rmse;
 
     // Create bind group for final display
     const displayBindGroup = gpu_device.createBindGroup({
@@ -1413,8 +1413,8 @@ async function render() {
     gpu_device.queue.submit([commandEncoder.finish()]);
 
     // Calculate RMSE if enabled (skip if already in progress)
-    if (shouldCalcRmse && !rmseInProgress) {
-        rmseInProgress = true;
+    if (shouldCalcRmse && !rmse_in_progress) {
+        rmse_in_progress = true;
 
         try {
             // Reset pools for Gaussian blur calculation
@@ -1425,19 +1425,19 @@ async function render() {
             const gaussEncoder = gpu_device.createCommandEncoder();
 
             // Horizontal pass: input -> temp
-            if (blurParams.radiusX > 0) {
-                separablePass(gaussEncoder, tex_source, tex_blur_tmp, BlurMode.GAUSSIAN, true, blurParams.radiusX);
+            if (blur_params.radius_x > 0) {
+                separablePass(gaussEncoder, tex_source, tex_blur_tmp, BlurMode.GAUSSIAN, true, blur_params.radius_x);
             }
 
             // Vertical pass: temp -> gaussianRef (or input -> gaussianRef if no horizontal)
-            if (blurParams.radiusY > 0) {
-                const vertInput = blurParams.radiusX > 0 ? tex_blur_tmp : tex_source;
-                separablePass(gaussEncoder, vertInput, gaussianRefTexture, BlurMode.GAUSSIAN, false, blurParams.radiusY);
-            } else if (blurParams.radiusX > 0) {
+            if (blur_params.radius_y > 0) {
+                const vertInput = blur_params.radius_x > 0 ? tex_blur_tmp : tex_source;
+                separablePass(gaussEncoder, vertInput, tex_blurred_ref, BlurMode.GAUSSIAN, false, blur_params.radius_y);
+            } else if (blur_params.radius_x > 0) {
                 // Copy temp to gaussianRef if only horizontal blur
                 gaussEncoder.copyTextureToTexture(
                     { texture: tex_blur_tmp },
-                    { texture: gaussianRefTexture },
+                    { texture: tex_blurred_ref },
                     [width, height]
                 );
             }
@@ -1446,7 +1446,7 @@ async function render() {
 
             await calculateAndDisplayRMSE(width, height);
         } finally {
-            rmseInProgress = false;
+            rmse_in_progress = false;
         }
     }
 }
@@ -1457,16 +1457,16 @@ async function calculateAndDisplayRMSE(width, height) {
     const numGroups = numGroupsX * numGroupsY;
 
     // Update uniform buffer with numGroupsX
-    gpu_device.queue.writeBuffer(rmseUniformBuffer, 0, new Uint32Array([numGroupsX]));
+    gpu_device.queue.writeBuffer(rmse_buf_ubo, 0, new Uint32Array([numGroupsX]));
 
     // Create compute bind group
     const computeBindGroup = gpu_device.createBindGroup({
-        layout: rmseComputePipeline.getBindGroupLayout(0),
+        layout: rmse_pip.getBindGroupLayout(0),
         entries: [
-            { binding: 0, resource: gaussianRefTexture.createView() },
+            { binding: 0, resource: tex_blurred_ref.createView() },
             { binding: 1, resource: tex_blurred.createView() },
-            { binding: 2, resource: { buffer: rmseResultBuffer } },
-            { binding: 3, resource: { buffer: rmseUniformBuffer } },
+            { binding: 2, resource: { buffer: rmse_buf_result } },
+            { binding: 3, resource: { buffer: rmse_buf_ubo } },
         ],
     });
 
@@ -1474,24 +1474,24 @@ async function calculateAndDisplayRMSE(width, height) {
 
     // Dispatch compute shader
     const computePass = commandEncoder.beginComputePass();
-    computePass.setPipeline(rmseComputePipeline);
+    computePass.setPipeline(rmse_pip);
     computePass.setBindGroup(0, computeBindGroup);
     computePass.dispatchWorkgroups(numGroupsX, numGroupsY);
     computePass.end();
 
     // Copy results to staging buffer
     commandEncoder.copyBufferToBuffer(
-        rmseResultBuffer, 0,
-        rmseReadBuffer, 0,
+        rmse_buf_result, 0,
+        rmse_buf_read, 0,
         numGroups * 4
     );
 
     gpu_device.queue.submit([commandEncoder.finish()]);
 
     // Map and read the staging buffer
-    await rmseReadBuffer.mapAsync(GPUMapMode.READ);
-    const results = new Float32Array(rmseReadBuffer.getMappedRange().slice(0));
-    rmseReadBuffer.unmap();
+    await rmse_buf_read.mapAsync(GPUMapMode.READ);
+    const results = new Float32Array(rmse_buf_read.getMappedRange().slice(0));
+    rmse_buf_read.unmap();
 
     // Sum all workgroup results
     let totalSquaredDiff = 0;
@@ -1526,8 +1526,8 @@ function setupEventHandlers() {
 
     // Window resize
     window.addEventListener('resize', () => {
-        if (currentImageSize.width > 0) {
-            fitCanvasToViewport(currentImageSize.width, currentImageSize.height);
+        if (cur_image_size.width > 0) {
+            fitCanvasToViewport(cur_image_size.width, cur_image_size.height);
         }
     });
 
@@ -1560,7 +1560,7 @@ function setupEventHandlers() {
     const splitKawaseControls = document.getElementById('splitKawaseControls');
     document.querySelectorAll('input[name="blurMode"]').forEach(radio => {
         radio.addEventListener('change', (e) => {
-            blurParams.mode = e.target.value;
+            blur_params.mode = e.target.value;
             // Enable/disable Split Kawase weight controls
             splitKawaseControls.classList.toggle('enabled', e.target.value === 'split_kawase');
             onBlurParamsChanged();
@@ -1577,11 +1577,11 @@ function setupEventHandlers() {
 
     radiusX.addEventListener('input', (e) => {
         const value = parseInt(e.target.value);
-        blurParams.radiusX = value;
+        blur_params.radius_x = value;
         radiusXValue.textContent = value;
 
-        if (blurParams.lockRadius) {
-            blurParams.radiusY = value;
+        if (blur_params.lock_radius) {
+            blur_params.radius_y = value;
             radiusY.value = value;
             radiusYValue.textContent = value;
         }
@@ -1591,22 +1591,22 @@ function setupEventHandlers() {
     // Radius Y slider
     radiusY.addEventListener('input', (e) => {
         const value = parseInt(e.target.value);
-        blurParams.radiusY = value;
+        blur_params.radius_y = value;
         radiusYValue.textContent = value;
         onBlurParamsChanged();
     });
 
     // Lock checkbox
     lockRadius.addEventListener('change', (e) => {
-        blurParams.lockRadius = e.target.checked;
+        blur_params.lock_radius = e.target.checked;
         radiusY.disabled = e.target.checked;
         radiusYRow.classList.toggle('disabled', e.target.checked);
 
         if (e.target.checked) {
             // Sync Y to X when locking
-            blurParams.radiusY = blurParams.radiusX;
-            radiusY.value = blurParams.radiusX;
-            radiusYValue.textContent = blurParams.radiusX;
+            blur_params.radius_y = blur_params.radius_x;
+            radiusY.value = blur_params.radius_x;
+            radiusYValue.textContent = blur_params.radius_x;
             onBlurParamsChanged();
         }
     });
@@ -1614,7 +1614,7 @@ function setupEventHandlers() {
     // RMSE checkbox
     const calcRmse = document.getElementById('calcRmse');
     calcRmse.addEventListener('change', (e) => {
-        blurParams.calcRmse = e.target.checked;
+        blur_params.calc_rmse = e.target.checked;
         if (!e.target.checked) {
             document.getElementById('rmseDisplay').textContent = 'RMSE: --';
         }
@@ -1632,7 +1632,7 @@ function setupEventHandlers() {
         const valueEl = document.getElementById(`${prefix}${weightKey.toUpperCase()}Value`);
         slider.addEventListener('input', (e) => {
             const value = parseFloat(e.target.value);
-            blurParams[configKey][weightKey] = value;
+            blur_params[configKey][weightKey] = value;
             valueEl.textContent = value.toFixed(2);
             onBlurParamsChanged();
         });
@@ -1655,8 +1655,8 @@ function setupEventHandlers() {
     // Reset weights button
     document.getElementById('resetWeights').addEventListener('click', () => {
         // Reset to defaults
-        blurParams.splitCfgDown = { ...defaultWeights.down };
-        blurParams.splitCfgUp = { ...defaultWeights.up };
+        blur_params.split_cfg_down = { ...defaultWeights.down };
+        blur_params.split_cfg_up = { ...defaultWeights.up };
 
         // Update sliders and values
         ['w00', 'w05', 'w10', 'w15', 'w20'].forEach(key => {
