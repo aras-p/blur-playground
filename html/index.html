@@ -896,7 +896,7 @@ function createTexture2D(width, height) {
 
 function fitCanvasToViewport(imageWidth, imageHeight) {
     const canvas = document.getElementById('canvas');
-    const margin = 40; // pixels of margin around canvas
+    const margin = 20; // pixels of margin around canvas
 
     // Available space (viewport minus controls and margins)
     const controlsHeight = document.querySelector('.controls').offsetHeight;
@@ -906,7 +906,7 @@ function fitCanvasToViewport(imageWidth, imageHeight) {
     // Calculate scale to fit
     const scaleX = maxWidth / imageWidth;
     const scaleY = maxHeight / imageHeight;
-    const scale = Math.min(scaleX, scaleY, 1.0); // Never upscale
+    const scale = Math.min(scaleX, scaleY, 4.0); // don't scale up by more than 4x
 
     canvas.style.width = Math.floor(imageWidth * scale) + 'px';
     canvas.style.height = Math.floor(imageHeight * scale) + 'px';
