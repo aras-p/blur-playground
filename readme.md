@@ -3,6 +3,10 @@
 Implementation of several image blurring algorithms. Runs in the browser
 -- open `html/index.html` (requires WebGPU capable browser).
 
+In order to load provided sample image files, just opening the HTML page
+in a browser won't work. Easiest is then to run `python3 -m http.server 8000`
+and go to `http://localhost:8000/html/index.html`.
+
 ### Blur Algorithms
 
 - **Box**, **Tent**, **Gaussian** - separable blurs

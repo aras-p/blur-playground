@@ -39,6 +39,21 @@ body {
 .dropzone input {
     display: none;
 }
+.sample-files {
+    display: flex;
+    gap: 8px;
+    margin-top: 6px;
+    flex-wrap: wrap;
+}
+.sample-link {
+    font-size: 11px;
+    color: #888;
+    text-decoration: none;
+}
+.sample-link:hover {
+    color: #aaa;
+    text-decoration: underline;
+}
 #canvas {
     border: 1px solid #333;
     max-width: 100%;
@@ -173,9 +188,15 @@ body {
 </head>
 <body>
 <div class="controls">
-    <div class="dropzone" id="dropzone">
-        <input type="file" id="fileInput" accept="image/png,image/jpeg,.exr">
-        <span>Click to browse or drag & drop PNG/JPG/EXR</span>
+    <div class="control-group">
+        <div class="dropzone" id="dropzone">
+            <input type="file" id="fileInput" accept="image/png,image/jpeg,.exr">
+            <span>Click to browse or drag & drop PNG/JPG/EXR</span>
+        </div>
+        <div class="sample-files">
+            <a href="#" class="sample-link" data-src="../exr/test_a_small.exr">test_a_small</a>
+            <a href="#" class="sample-link" data-src="../exr/test_b_1080p.exr">test_b_1080p</a>
+        </div>
     </div>
 
     <div class="control-group">
@@ -1314,13 +1335,30 @@ function setupEventHandlers() {
 
         const files = e.dataTransfer.files;
         if (files.length > 0) {
-            const file = files[0];
-            if (file.type === 'image/png' || file.type === 'image/jpeg') {
-                handleImageFile(file);
-            } else {
-                document.getElementById('error').textContent = 'Please drop a PNG or JPEG file.';
-            }
+            handleImageFile(files[0]);
         }
+    });
+
+    // Sample file links
+    document.querySelectorAll('.sample-link').forEach(link => {
+        link.addEventListener('click', async (e) => {
+            e.preventDefault();
+            const src = link.dataset.src;
+            const statusEl = document.getElementById('status');
+            const errorEl = document.getElementById('error');
+            try {
+                statusEl.textContent = `Loading ${src}...`;
+                errorEl.textContent = '';
+                const response = await fetch(src);
+                if (!response.ok) throw new Error(`Failed to fetch ${src}`);
+                const blob = await response.blob();
+                const file = new File([blob], src.split('/').pop(), { type: blob.type });
+                handleImageFile(file);
+            } catch (err) {
+                errorEl.textContent = `Error loading sample ${src}: ${err.message}`;
+                statusEl.textContent = '';
+            }
+        });
     });
 
     // Blur mode radio buttons
