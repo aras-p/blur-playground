@@ -205,6 +205,10 @@ body {
             <input type="checkbox" id="lockRadius" checked>
             <label for="lockRadius">Lock X & Y</label>
         </div>
+        <div class="checkbox-row">
+            <input type="checkbox" id="lockPow2">
+            <label for="lockPow2">Snap to 3×2ⁿ</label>
+        </div>
     </div>
 
     <div class="control-group weight-controls" id="splitKawaseControls">
@@ -528,10 +532,29 @@ const blur_params = {
     radius_x: 10,
     radius_y: 10,
     lock_radius: true,
+    lock_pow2: false,
     // Split Kawase filter configs
     split_cfg_down: { w00: 2.120, w05: 0.750, w10: 1.300, w15: 0.100, w20: 0.150 },
     split_cfg_up:   { w00: 0.000, w05: 2.800, w10: 0.700, w15: 0.000, w20: 0.010 },
 };
+
+// These are 3 * powers of two, which for the Kawase variants means there is
+// no "residual blending" step done.
+const POW2_RADII = [3, 6, 12, 24, 48, 96, 192, 384, 768, 1536, 3072, 6144, 12288];
+
+function snapToPow2Radius(value) {
+    if (value <= 0) return 3;
+    let closest = POW2_RADII[0];
+    let minDist = Math.abs(value - closest);
+    for (const r of POW2_RADII) {
+        const dist = Math.abs(value - r);
+        if (dist < minDist) {
+            minDist = dist;
+            closest = r;
+        }
+    }
+    return closest;
+}
 
 // ================ Initialization
 
@@ -1320,7 +1343,11 @@ function setupEventHandlers() {
     const lockRadius = document.getElementById('lockRadius');
 
     radiusX.addEventListener('input', (e) => {
-        const value = parseInt(e.target.value);
+        let value = parseInt(e.target.value);
+        if (blur_params.lock_pow2) {
+            value = snapToPow2Radius(value);
+            radiusX.value = value;
+        }
         blur_params.radius_x = value;
         radiusXValue.textContent = value;
 
@@ -1334,7 +1361,11 @@ function setupEventHandlers() {
 
     // Radius Y slider
     radiusY.addEventListener('input', (e) => {
-        const value = parseInt(e.target.value);
+        let value = parseInt(e.target.value);
+        if (blur_params.lock_pow2) {
+            value = snapToPow2Radius(value);
+            radiusY.value = value;
+        }
         blur_params.radius_y = value;
         radiusYValue.textContent = value;
         onBlurParamsChanged();
@@ -1351,6 +1382,24 @@ function setupEventHandlers() {
             blur_params.radius_y = blur_params.radius_x;
             radiusY.value = blur_params.radius_x;
             radiusYValue.textContent = blur_params.radius_x;
+            onBlurParamsChanged();
+        }
+    });
+
+    // Lock pow2
+    const lockPow2 = document.getElementById('lockPow2');
+    lockPow2.addEventListener('change', (e) => {
+        blur_params.lock_pow2 = e.target.checked;
+        if (e.target.checked) {
+            // Snap current values to nearest pow2 radius
+            blur_params.radius_x = snapToPow2Radius(blur_params.radius_x);
+            radiusX.value = blur_params.radius_x;
+            radiusXValue.textContent = blur_params.radius_x;
+
+            blur_params.radius_y = snapToPow2Radius(blur_params.radius_y);
+            radiusY.value = blur_params.radius_y;
+            radiusYValue.textContent = blur_params.radius_y;
+
             onBlurParamsChanged();
         }
     });
