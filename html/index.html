@@ -417,28 +417,45 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 
 // ================ WebGPU state
 
+/** @type {GPUDevice} */
 let gpu_device = null;
+/** @type {GPUCanvasContext} */
 let gpu_ctx = null;
+/** @type {GPUTextureFormat} */
 let gpu_canvas_format = null;
+/** @type {GPUSampler} */
 let gpu_sampler_linear = null;
+/** @type {GPUSampler} */
 let gpu_sampler_point = null;
+/** @type {GPUBindGroup} */
 let gpu_bind_group = null;
+/** @type {GPUTexture} */
 let tex_source = null;
+/** @type {GPUTexture} */
 let tex_blurred = null;
+/** @type {GPUTexture} */
 let tex_blur_tmp = null;
+/** @type {GPURenderPipeline} */
 let pip_display = null;
+/** @type {GPURenderPipeline} */
 let pip_separable = null;
+/** @type {GPURenderPipeline} */
 let pip_dk_down = null;
+/** @type {GPURenderPipeline} */
 let pip_dk_up = null;
+/** @type {GPURenderPipeline} */
 let pip_dk_mix = null;
+/** @type {GPURenderPipeline} */
 let pip_split_kaw = null;
 
 let cur_image_size = { width: 0, height: 0 };
 
 // Reusable resources for Kawase blurs
-let kawaseUniformBuffers = [];  // Pool of uniform buffers
+/** @type {GPUBuffer[]} */
+let kawaseUniformBuffers = [];
 let kawaseUniformBufferIndex = 0;
-let kawaseTextureCache = new Map();  // Cache textures by "width,height" key
+/** @type {Map<string, GPUTexture>} */
+let kawaseTextureCache = new Map();
 
 // ================ Various helpers
 
@@ -577,7 +594,6 @@ function srgbToLinear(value) {
 }
 
 async function loadImage(file) {
-    const statusEl = document.getElementById('status');
     const errorEl = document.getElementById('error');
     errorEl.textContent = '';
 
