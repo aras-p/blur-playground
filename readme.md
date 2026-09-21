@@ -44,8 +44,11 @@ prefixes are shared between transition paths, and reconstruction writes the
 full-resolution output once.
 
 Before an axis changes resolution, a smoothstep crossfade blends two approximations
-of the **same target blur**. Both axes transitioning can require four small Gaussian
-results. Each is reconstructed directly onto the output grid to avoid an extra
+of the **same target blur**. Transitions use triangular interpolation: at most three small Gaussian results,
+and only two when the X/Y transition fractions match. A canonical reduction tree
+reduces both axes together first, then any remaining axis, so neighboring endpoints
+share the expensive large-image downsample prefix. The fixed route also keeps
+odd-sized resampling consistent across transition boundaries. Each is reconstructed directly onto the output grid to avoid an extra
 resize appearing or disappearing at a boundary. Kernel tails taper smoothly as
 the tap count changes. This prioritizes smooth radius changes and a rounded blur
 shape over exact Gaussian matching; resampling still introduces some phase-dependent
