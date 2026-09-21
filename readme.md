@@ -13,6 +13,9 @@ and go to `http://localhost:8000/html/index.html`.
   implemented with the same shader, just different convolution
   kernel shapes. Box and Tent are not great blurs; just here
   because they were easy to do.
+- **Reduced Gaussian** - independent X/Y area downsampling, followed by small
+  separable Gaussian filters and cubic B-spline reconstruction. Uses just the radius
+  controls; working resolution and filter widths are chosen internally.
 - **Dual Kawase** - multi-pass downsample/upsample pyramid blur, from
   Marius Bjørge, [Bandwidth-Efficient Rendering](https://community.arm.com/cfs-file/__key/communityserver-blogs-components-weblogfiles/00-00-00-20-66/siggraph2015_2D00_mmg_2D00_marius_2D00_notes.pdf) (SIGGRAPH 2015),
   see also explanation in [this blog post](https://blog.frost.kiwi/dual-kawase/#dual-kawase-blur).
@@ -23,6 +26,37 @@ and go to `http://localhost:8000/html/index.html`.
 - **Split Kawase** - Similar to Dual Kawase, but with separate
   horizontal/vertical passes for different X/Y radii; has configurable sample weights.
   It looks a bit shit, TBH.
+
+### Reduced Gaussian
+
+Radius maps approximately to three Gaussian standard deviations, like the existing
+Gaussian mode. Each axis reduces independently to keep the working sigma small;
+a zero-radius axis keeps its original resolution and is not filtered. Downsampling
+integrates pixel areas to preserve bright points on odd-sized images. The residual
+Gaussian compensates approximately for reduction and reconstruction variance.
+Reconstruction uses a positive cubic B-spline (four bilinear samples in 2D,
+two in 1D), removing coarse-grid slope discontinuities without ringing around
+HDR highlights. Unreduced axes bypass cubic filtering to preserve sharp detail.
+
+Gaussian samples are paired using bilinear filtering, with at most 25 texture
+reads per pixel per axis. Textures and uniform buffers are reused. Reduction
+prefixes are shared between transition paths, and reconstruction writes the
+full-resolution output once.
+
+Before an axis changes resolution, a smoothstep crossfade blends two approximations
+of the **same target blur**. Both axes transitioning can require four small Gaussian
+results. Each is reconstructed directly onto the output grid to avoid an extra
+resize appearing or disappearing at a boundary. Kernel tails taper smoothly as
+the tap count changes. This prioritizes smooth radius changes and a rounded blur
+shape over exact Gaussian matching; resampling still introduces some phase-dependent
+shape variation. Radius sliders accept fractional values (0.1 steps); disable
+"Snap to 3×2ⁿ" when evaluating smooth changes.
+
+To run WebGPU regression checks, serve the repository and open
+`tests/reduced-gaussian.html`. It checks HDR/alpha preservation, zero-radius axes,
+odd and tiny images, impulse energy/anisotropy, and radius transitions. It also
+reports a warmed-up 1080p comparison with the existing Gaussian, including CPU
+encoding and GPU completion time rather than isolated shader time.
 
 ### Dual Kawase interpolation
 
