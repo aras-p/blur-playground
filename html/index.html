@@ -251,16 +251,16 @@ body {
         <label>Blur Radius</label>
         <div class="slider-row">
             <label for="radiusX">X:</label>
-            <input type="range" id="radiusX" min="0" max="500" value="24">
-            <span class="value" id="radiusXValue">24</span>
+            <input type="range" id="radiusX" min="0" max="500" value="96">
+            <span class="value" id="radiusXValue">96</span>
         </div>
         <div class="slider-row disabled" id="radiusYRow">
             <label for="radiusY">Y:</label>
-            <input type="range" id="radiusY" min="0" max="500" value="24" disabled>
-            <span class="value" id="radiusYValue">24</span>
+            <input type="range" id="radiusY" min="0" max="500" value="96">
+            <span class="value" id="radiusYValue">96</span>
         </div>
         <div class="checkbox-row">
-            <input type="checkbox" id="lockRadius" checked>
+            <input type="checkbox" id="lockRadius">
             <label for="lockRadius">Lock X & Y</label>
         </div>
         <div class="checkbox-row">
@@ -599,9 +599,9 @@ const BlurMode = {
 
 const blur_params = {
     mode: BlurMode.DUAL_KAWASE,
-    radius_x: 24,
-    radius_y: 24,
-    lock_radius: true,
+    radius_x: 96,
+    radius_y: 96,
+    lock_radius: false,
     lock_pow2: false,
     // Split Kawase filter configs
     split_cfg_down: { w00: 2.120, w05: 0.750, w10: 1.300, w15: 0.100, w20: 0.150 },
@@ -1010,14 +1010,14 @@ function clearTextureCache() {
     kawaseTextureCache.clear();
 }
 
-function kawaseDownsample(commandEncoder, input, fullSizeX, fullSizeY, divisor, ratio) {
-    const sizeX = Math.max(Math.floor(fullSizeX / divisor), 1);
-    const sizeY = Math.max(Math.floor(fullSizeY / divisor), 1);
+function kawaseDownsample(commandEncoder, input, fullSizeX, fullSizeY, divisorX, divisorY, ratioX, ratioY) {
+    const sizeX = Math.max(Math.floor(fullSizeX / Math.max(divisorX,1)), 1);
+    const sizeY = Math.max(Math.floor(fullSizeY / Math.max(divisorY,1)), 1);
     const output = getCachedTexture(sizeX, sizeY);
 
     // Note: "step" is based on *output* size, which is 2x smaller than input
-    const stepX = ratio / sizeX;
-    const stepY = ratio / sizeY;
+    const stepX = ratioX / sizeX;
+    const stepY = ratioY / sizeY;
 
     const paramsData = new Float32Array([stepX, stepY]);
     const paramsBuffer = getKawaseUniformBuffer();
@@ -1049,14 +1049,14 @@ function kawaseDownsample(commandEncoder, input, fullSizeX, fullSizeY, divisor, 
     return output;
 }
 
-function kawaseUpsample(commandEncoder, input, fullSizeX, fullSizeY, divisor, ratio, existingOutput = null) {
-    const sizeX = Math.max(Math.floor(fullSizeX / divisor), 1);
-    const sizeY = Math.max(Math.floor(fullSizeY / divisor), 1);
-    const output = existingOutput || getCachedTexture(sizeX, sizeY);
+function kawaseUpsample(commandEncoder, input, fullSizeX, fullSizeY, divisorX, divisorY, ratioX, ratioY) {
+    const sizeX = Math.max(Math.floor(fullSizeX / Math.max(divisorX,1)), 1);
+    const sizeY = Math.max(Math.floor(fullSizeY / Math.max(divisorY,1)), 1);
+    const output = getCachedTexture(sizeX, sizeY);
 
     // Note: "step" is based on *input* size, which is 2x smaller than output
-    const stepX = ratio / input.width;
-    const stepY = ratio / input.height;
+    const stepX = ratioX / input.width;
+    const stepY = ratioY / input.height;
 
     const paramsData = new Float32Array([stepX, stepY]);
     const paramsBuffer = getKawaseUniformBuffer();
@@ -1124,13 +1124,32 @@ function kawaseCopy(commandEncoder, input, output) {
     );
 }
 
-function blurDualKawase(commandEncoder, input, output) {
-    // Dual Kawase is isotropic, so blur based on max(x,y)
-    const radius = Math.max(blur_params.radius_x, blur_params.radius_y);
+function kawaseResidual(commandEncoder, fullSizeX, fullSizeY, curr, lastPass, lastPassIso, residual, doX, doY) {
+    if (residual <= 0.0) {
+        return curr;
+    }
+    let nextPass = Math.max(lastPass, 1) * 2;
+    let ratio = residual / (nextPass - lastPass);
 
+    // Downsample and upsample one more step
+    let stepRatio = 0.5 + 0.5 * ratio;
+    const extraDown = kawaseDownsample(commandEncoder, curr, fullSizeX, fullSizeY, doX ? nextPass : lastPassIso, doY ? nextPass : lastPassIso, doX ? stepRatio : 0.0, doY ? stepRatio : 0.0);
+    intermediateTextures.push({ texture: extraDown, name: `Residual (${doX},${doY} ${nextPass}/${lastPassIso}) down: ${extraDown.width}×${extraDown.height}` });
+    const extraUp = kawaseUpsample(commandEncoder, extraDown, fullSizeX, fullSizeY, doX ? lastPass : lastPassIso, doY ? lastPass : lastPassIso, doX ? stepRatio : 0.0, doY ? stepRatio : 0.0);
+    intermediateTextures.push({ texture: extraUp, name: `Residual (${doX},${doY} ${nextPass}/${lastPassIso}) up: ${extraUp.width}×${extraUp.height}` });
+    // Mix current with that extra step based on ratio
+    kawaseMix(commandEncoder, curr, extraUp, 1.0 - ratio);
+    curr = extraUp;
+    return curr;
+}
+
+function blurDualKawase(commandEncoder, input, output) {
     // Amount of Kawase "steps" to do; this more or less matches the blur amount of Gaussian
-    const numSteps = radius / 3.0;
-    if (numSteps <= 0.0) {
+    const numStepsX = Math.floor(blur_params.radius_x / 3.0);
+    const numStepsY = Math.floor(blur_params.radius_y / 3.0);
+    const numStepsMax = Math.max(numStepsX, numStepsY);
+    const numStepsMin = Math.min(numStepsX, numStepsY);
+    if (numStepsMax <= 0.0) {
         kawaseCopy(commandEncoder, input, output);
         return;
     }
@@ -1140,57 +1159,81 @@ function blurDualKawase(commandEncoder, input, output) {
 
     let curr = input;
 
-    // Downsample
+    // Downsample, isotropic part
     let lastPass = 0;
-    for (let i = 2; i <= numSteps; i *= 2) {
-        curr = kawaseDownsample(commandEncoder, curr, fullSizeX, fullSizeY, i, 1.0);
+    for (let i = 2; i <= numStepsMin; i *= 2) {
+        curr = kawaseDownsample(commandEncoder, curr, fullSizeX, fullSizeY, i, i, 1.0, 1.0);
         intermediateTextures.push({
             texture: curr,
-            name: `Down (1/${i}): ${curr.width}×${curr.height}`
+            name: `Down (1/${i} ${numStepsX} ${numStepsY}): ${curr.width}×${curr.height}`
         });
         lastPass = i;
     }
 
-    let residual = numSteps - lastPass;
-    if (residual > 0.0) {
+    // Residual
+    let residualX = numStepsX - lastPass;
+    let residualY = numStepsY - lastPass;
+    let residualDoneX = false, residualDoneY = false;
+    let nextPass = Math.max(lastPass, 1) * 2;
+    {
+        if (residualX === residualY) {
+            curr = kawaseResidual(commandEncoder, fullSizeX, fullSizeY, curr, lastPass, lastPass, residualX, true, true);
+            residualDoneX = true;
+            residualDoneY = true;
+        }
+        else {
+            // Have to do X residual now?
+            if (numStepsX < nextPass) {
+                curr = kawaseResidual(commandEncoder, fullSizeX, fullSizeY, curr, lastPass, lastPass, residualX, true, false);
+                residualDoneX = true;
+            }
+            // Have to do X residual now?
+            if (numStepsY < nextPass) {
+                curr = kawaseResidual(commandEncoder, fullSizeX, fullSizeY, curr, lastPass, lastPass, residualY, false, true);
+                residualDoneY = true;
+            }
+        }
+    }
+
+    // Downsample, only X or Y part
+    let lastAnisoPass = lastPass;
+    //if (numStepsMax > numStepsMin)
+    {
+        for (let i = nextPass; i <= numStepsMax; i *= 2) {
+            curr = kawaseDownsample(commandEncoder, curr, fullSizeX, fullSizeY, i <= numStepsX ? i : lastPass, i <= numStepsY ? i : lastPass, i <= numStepsX ? 1.0 : 0.0, i <= numStepsY ? 1.0 : 0.0);
+            intermediateTextures.push({
+                texture: curr,
+                name: `DownA (1/${i} ${numStepsX} ${numStepsY}): ${curr.width}×${curr.height}`
+            });
+            lastAnisoPass = i;
+        }
+    }
+
+    // Potential leftover just X or Y residual
+    if (lastAnisoPass > lastPass) {
+        residualX = numStepsX - lastAnisoPass;
+        residualY = numStepsY - lastAnisoPass;
         let nextPass = Math.max(lastPass, 1) * 2;
-        let ratio = residual / (nextPass - lastPass);
-        lastPass = Math.max(lastPass, 1);
-
-        // Downsample and upsample one more step
-        const extraDown = kawaseDownsample(commandEncoder, curr, fullSizeX, fullSizeY, nextPass, 0.5 + 0.5 * ratio);
-        intermediateTextures.push({
-            texture: extraDown,
-            name: `Residual down: ${extraDown.width}×${extraDown.height}`
-        });
-        const extraUp = kawaseUpsample(commandEncoder, extraDown, fullSizeX, fullSizeY, lastPass, 0.5 + 0.5 * ratio);
-        intermediateTextures.push({
-            texture: extraUp,
-            name: `Residual up: ${extraUp.width}×${extraUp.height}`
-        });
-
-        // Mix current with that extra step based on ratio
-        kawaseMix(commandEncoder, curr, extraUp, 1.0 - ratio);
-        curr = extraUp;
-
-        // If there will be no further upsamples, copy to output
-        if (lastPass < 2) {
-            kawaseCopy(commandEncoder, curr, output);
-            return;
+        if (residualX > 0.0 && !residualDoneX) {
+            curr = kawaseResidual(commandEncoder, fullSizeX, fullSizeY, curr, lastAnisoPass, lastPass, residualX, true, false);
+        }
+        if (residualY > 0.0 && !residualDoneY) {
+            curr = kawaseResidual(commandEncoder, fullSizeX, fullSizeY, curr, lastAnisoPass, lastPass, residualY, false, true);
         }
     }
 
     // Upsample
-    for (let i = Math.floor(lastPass / 2); i >= 1; i = Math.floor(i / 2)) {
-        const isLast = i === 1;
-        curr = kawaseUpsample(commandEncoder, curr, fullSizeX, fullSizeY, i, 1.0, isLast ? output : null);
-        if (!isLast) {
+    for (let i = Math.floor(lastAnisoPass / 2); i >= 1; i = Math.floor(i / 2)) {
+        curr = kawaseUpsample(commandEncoder, curr, fullSizeX, fullSizeY, i <= numStepsX ? i : lastPass, i <= numStepsY ? i : lastPass, i <= numStepsX ? 1.0 : 0.0, i <= numStepsY ? 1.0 : 0.0);
+        if (i > 1) {
             intermediateTextures.push({
                 texture: curr,
                 name: `Up (1/${i}): ${curr.width}×${curr.height}`
             });
         }
     }
+
+    kawaseCopy(commandEncoder, curr, output); // copy to output
 }
 
 // ================ Split Kawase blur
@@ -1398,15 +1441,12 @@ async function render() {
     // Apply blur if radius > 0
     if (blur_params.radius_x > 0 || blur_params.radius_y > 0) {
         if (blur_params.mode === BlurMode.DUAL_KAWASE) {
-            // Dual Kawase blur
             blurDualKawase(commandEncoder, tex_source, tex_blurred);
             blurredOutput = tex_blurred;
         } else if (blur_params.mode === BlurMode.SPLIT_KAWASE) {
-            // Split Kawase blur
             blurSplitKawase(commandEncoder, tex_source, tex_blurred);
             blurredOutput = tex_blurred;
         } else {
-            // Separable blur (Box, Tent, Gaussian)
             // Horizontal pass: input -> temp
             if (blur_params.radius_x > 0) {
                 separablePass(commandEncoder, tex_source, tex_blur_tmp, blur_params.mode, true, blur_params.radius_x);
@@ -1415,7 +1455,6 @@ async function render() {
                     name: `Horizontal: ${tex_blur_tmp.width}×${tex_blur_tmp.height}`
                 });
             }
-
             // Vertical pass: temp -> output (or input -> output if no horizontal)
             if (blur_params.radius_y > 0) {
                 const vertInput = blur_params.radius_x > 0 ? tex_blur_tmp : tex_source;
