@@ -85,6 +85,15 @@ and vertical filters. Its visual quality is currently unsatisfactory.
 
 Test inputs are available in the `exr/` folder.
 
+### GPU timing
+
+The readout below the image shows `GPU blur: X.Yms`, summing timestamp queries
+on the blur render passes. CPU work, uploads, display, texture copies, and readback
+are excluded. Results update asynchronously; browser timestamp precision and
+first-run warmup can affect small measurements. When `timestamp-query` is not
+available, `Blur queue: ~X.Yms` explicitly labels a queue-completion estimate,
+which can include scheduling delays and previously queued work.
+
 ### Features
 
 - Drag & drop or browse for images (PNG/JPG/EXR),
