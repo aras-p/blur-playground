@@ -1124,116 +1124,100 @@ function kawaseCopy(commandEncoder, input, output) {
     );
 }
 
-function kawaseResidual(commandEncoder, fullSizeX, fullSizeY, curr, lastPass, lastPassIso, residual, doX, doY) {
-    if (residual <= 0.0) {
-        return curr;
+// Discrete radii are 0, 6, 12, 24, ... (pyramid divisors 0, 2, 4, 8, ...).
+function kawaseRadiusInterval(radius) {
+    const steps = Math.max(radius, 0) / 3.0;
+    let lower = 0;
+    let upper = 2;
+    while (upper <= steps) {
+        lower = upper;
+        upper *= 2;
     }
-    let nextPass = Math.max(lastPass, 1) * 2;
-    let ratio = residual / (nextPass - lastPass);
-
-    // Downsample and upsample one more step
-    let stepRatio = 0.5 + 0.5 * ratio;
-    const extraDown = kawaseDownsample(commandEncoder, curr, fullSizeX, fullSizeY, doX ? nextPass : lastPassIso, doY ? nextPass : lastPassIso, doX ? stepRatio : 0.0, doY ? stepRatio : 0.0);
-    intermediateTextures.push({ texture: extraDown, name: `Residual (${doX},${doY} ${nextPass}/${lastPassIso}) down: ${extraDown.width}×${extraDown.height}` });
-    const extraUp = kawaseUpsample(commandEncoder, extraDown, fullSizeX, fullSizeY, doX ? lastPass : lastPassIso, doY ? lastPass : lastPassIso, doX ? stepRatio : 0.0, doY ? stepRatio : 0.0);
-    intermediateTextures.push({ texture: extraUp, name: `Residual (${doX},${doY} ${nextPass}/${lastPassIso}) up: ${extraUp.width}×${extraUp.height}` });
-    // Mix current with that extra step based on ratio
-    kawaseMix(commandEncoder, curr, extraUp, 1.0 - ratio);
-    curr = extraUp;
-    return curr;
+    return { lower, upper, fraction: (steps - lower) / (upper - lower) };
 }
 
 function blurDualKawase(commandEncoder, input, output) {
-    // Amount of Kawase "steps" to do; this more or less matches the blur amount of Gaussian
-    const numStepsX = Math.floor(blur_params.radius_x / 3.0);
-    const numStepsY = Math.floor(blur_params.radius_y / 3.0);
-    const numStepsMax = Math.max(numStepsX, numStepsY);
-    const numStepsMin = Math.min(numStepsX, numStepsY);
-    if (numStepsMax <= 0.0) {
-        kawaseCopy(commandEncoder, input, output);
-        return;
-    }
-
+    const x = kawaseRadiusInterval(blur_params.radius_x);
+    const y = kawaseRadiusInterval(blur_params.radius_y);
     const fullSizeX = cur_image_size.width;
     const fullSizeY = cur_image_size.height;
 
+    // Triangulate the radius cell along its lower/lower -> upper/upper diagonal.
+    // Equal radii use just the two isotropic endpoints; elsewhere at most three
+    // discrete kernels contribute. Adjacent triangles/cells share their edges.
+    const corners = [
+        { x: x.lower, y: y.lower, weight: 1.0 - Math.max(x.fraction, y.fraction) },
+        x.fraction >= y.fraction
+            ? { x: x.upper, y: y.lower, weight: x.fraction - y.fraction }
+            : { x: x.lower, y: y.upper, weight: y.fraction - x.fraction },
+        { x: x.upper, y: y.upper, weight: Math.min(x.fraction, y.fraction) },
+    ].filter(corner => corner.weight > 0.0);
+
+    // Every endpoint shares this isotropic downsample prefix and upsample suffix.
+    // Blend BEFORE the shared upsampling: the filters are linear, so there is no
+    // need to render several full-resolution blurs. For X=Y this is precisely one
+    // pyramid plus an extra down/up pair and a mix at its smallest shared level.
+    const commonLevel = Math.min(x.lower, y.lower);
     let curr = input;
-
-    // Downsample, isotropic part
-    let lastPass = 0;
-    for (let i = 2; i <= numStepsMin; i *= 2) {
+    for (let i = 2; i <= commonLevel; i *= 2) {
         curr = kawaseDownsample(commandEncoder, curr, fullSizeX, fullSizeY, i, i, 1.0, 1.0);
-        intermediateTextures.push({
-            texture: curr,
-            name: `Down (1/${i} ${numStepsX} ${numStepsY}): ${curr.width}×${curr.height}`
-        });
-        lastPass = i;
+        intermediateTextures.push({ texture: curr, name: `Down (1/${i}): ${curr.width}×${curr.height}` });
     }
+    const common = curr;
+    const downsampleCache = new Map();
 
-    // Residual
-    let residualX = numStepsX - lastPass;
-    let residualY = numStepsY - lastPass;
-    let residualDoneX = false, residualDoneY = false;
-    let nextPass = Math.max(lastPass, 1) * 2;
-    {
-        if (residualX === residualY) {
-            curr = kawaseResidual(commandEncoder, fullSizeX, fullSizeY, curr, lastPass, lastPass, residualX, true, true);
-            residualDoneX = true;
-            residualDoneY = true;
-        }
-        else {
-            // Have to do X residual now?
-            if (numStepsX < nextPass) {
-                curr = kawaseResidual(commandEncoder, fullSizeX, fullSizeY, curr, lastPass, lastPass, residualX, true, false);
-                residualDoneX = true;
+    function renderCorner(corner) {
+        let texture = common;
+        const minLevel = Math.min(corner.x, corner.y);
+        const maxLevel = Math.max(corner.x, corner.y);
+        let path = '';
+        for (let i = Math.max(commonLevel, 1) * 2; i <= maxLevel; i *= 2) {
+            const doX = i <= corner.x;
+            const doY = i <= corner.y;
+            const divisorX = doX ? i : minLevel;
+            const divisorY = doY ? i : minLevel;
+            // Also share any downsample prefix within the divergent branches.
+            path += `/${divisorX},${divisorY},${doX},${doY}`;
+            let down = downsampleCache.get(path);
+            if (!down) {
+                down = kawaseDownsample(commandEncoder, texture, fullSizeX, fullSizeY,
+                    divisorX, divisorY, doX ? 1.0 : 0.0, doY ? 1.0 : 0.0);
+                downsampleCache.set(path, down);
+                intermediateTextures.push({ texture: down, name: `Corner (${corner.x},${corner.y}) down: ${down.width}×${down.height}` });
             }
-            // Have to do X residual now?
-            if (numStepsY < nextPass) {
-                curr = kawaseResidual(commandEncoder, fullSizeX, fullSizeY, curr, lastPass, lastPass, residualY, false, true);
-                residualDoneY = true;
-            }
+            texture = down;
         }
+        // Keep the existing discrete pass sequence, including its inactive-axis
+        // divisors and offsets. Stop where the common upsample suffix begins.
+        for (let i = Math.floor(maxLevel / 2); i >= Math.max(commonLevel, 1); i = Math.floor(i / 2)) {
+            texture = kawaseUpsample(commandEncoder, texture, fullSizeX, fullSizeY,
+                i <= corner.x ? i : minLevel, i <= corner.y ? i : minLevel,
+                i <= corner.x ? 1.0 : 0.0, i <= corner.y ? 1.0 : 0.0);
+            intermediateTextures.push({ texture, name: `Corner (${corner.x},${corner.y}) up: ${texture.width}×${texture.height}` });
+        }
+        return texture;
     }
 
-    // Downsample, only X or Y part
-    let lastAnisoPass = lastPass;
-    //if (numStepsMax > numStepsMin)
-    {
-        for (let i = nextPass; i <= numStepsMax; i *= 2) {
-            curr = kawaseDownsample(commandEncoder, curr, fullSizeX, fullSizeY, i <= numStepsX ? i : lastPass, i <= numStepsY ? i : lastPass, i <= numStepsX ? 1.0 : 0.0, i <= numStepsY ? 1.0 : 0.0);
-            intermediateTextures.push({
-                texture: curr,
-                name: `DownA (1/${i} ${numStepsX} ${numStepsY}): ${curr.width}×${curr.height}`
-            });
-            lastAnisoPass = i;
-        }
+    const textures = corners.map(renderCorner);
+    // The last corner owns a filtered texture whenever blending is needed;
+    // never blend into the source or the saved common pyramid texture.
+    curr = textures[textures.length - 1];
+    let weight = corners[corners.length - 1].weight;
+    for (let i = corners.length - 2; i >= 0; --i) {
+        weight += corners[i].weight;
+        kawaseMix(commandEncoder, textures[i], curr, corners[i].weight / weight);
+    }
+    if (corners.length > 1) {
+        intermediateTextures.push({ texture: curr, name: `Interpolated (${blur_params.radius_x},${blur_params.radius_y}): ${curr.width}×${curr.height}` });
     }
 
-    // Potential leftover just X or Y residual
-    if (lastAnisoPass > lastPass) {
-        residualX = numStepsX - lastAnisoPass;
-        residualY = numStepsY - lastAnisoPass;
-        let nextPass = Math.max(lastPass, 1) * 2;
-        if (residualX > 0.0 && !residualDoneX) {
-            curr = kawaseResidual(commandEncoder, fullSizeX, fullSizeY, curr, lastAnisoPass, lastPass, residualX, true, false);
-        }
-        if (residualY > 0.0 && !residualDoneY) {
-            curr = kawaseResidual(commandEncoder, fullSizeX, fullSizeY, curr, lastAnisoPass, lastPass, residualY, false, true);
-        }
-    }
-
-    // Upsample
-    for (let i = Math.floor(lastAnisoPass / 2); i >= 1; i = Math.floor(i / 2)) {
-        curr = kawaseUpsample(commandEncoder, curr, fullSizeX, fullSizeY, i <= numStepsX ? i : lastPass, i <= numStepsY ? i : lastPass, i <= numStepsX ? 1.0 : 0.0, i <= numStepsY ? 1.0 : 0.0);
+    for (let i = Math.floor(commonLevel / 2); i >= 1; i = Math.floor(i / 2)) {
+        curr = kawaseUpsample(commandEncoder, curr, fullSizeX, fullSizeY, i, i, 1.0, 1.0);
         if (i > 1) {
-            intermediateTextures.push({
-                texture: curr,
-                name: `Up (1/${i}): ${curr.width}×${curr.height}`
-            });
+            intermediateTextures.push({ texture: curr, name: `Up (1/${i}): ${curr.width}×${curr.height}` });
         }
     }
-
-    kawaseCopy(commandEncoder, curr, output); // copy to output
+    kawaseCopy(commandEncoder, curr, output);
 }
 
 // ================ Split Kawase blur
