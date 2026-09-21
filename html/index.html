@@ -1133,7 +1133,10 @@ function kawaseRadiusInterval(radius) {
         lower = upper;
         upper *= 2;
     }
-    return { lower, upper, fraction: (steps - lower) / (upper - lower) };
+    const t = (steps - lower) / (upper - lower);
+    // Blending kernels interpolates variance. Remap the weight to make blur
+    // width grow more evenly between doubling steps.
+    return { lower, upper, fraction: t * (2.0 + t) / 3.0 };
 }
 
 function blurDualKawase(commandEncoder, input, output) {

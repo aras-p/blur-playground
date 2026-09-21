@@ -30,8 +30,10 @@ Dual Kawase is the main focus of this playground. The basic algorithm works well
 the implementation extends it in two ways:
 
 - **Arbitrary blur sizes:** between discrete blur steps, linearly blend the
-  previous and next blur amounts using the fractional position between steps,
-  similar to the OBS blur plugin linked above. Radii are not rounded before
+  previous and next blur amounts using the fractional position between steps
+  remapped with `t * (2 + t) / 3`. This compensates for blending kernel variance
+  rather than width, making blur growth more even between doubling steps.
+  Radii are not rounded before
   interpolation, and the filters use the normal discrete-step sampling offsets.
 - **Independent X/Y blur radii:** interpolate up to three neighboring discrete
   blur results, using triangles in the X/Y radius grid. At discrete radii,
