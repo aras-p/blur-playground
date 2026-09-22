@@ -26,9 +26,6 @@ and go to `http://localhost:8000/html/index.html`.
   horizontally & vertically and only allows very discrete
   amounts of blur (more or less "powers of two" radii), so to achieve arbitrary radius there's
   an extra step that blends between two discrete blur amounts, similar to how [obs-composite-blur](https://github.com/FiniteSingularity/obs-composite-blur) does it.
-- **Split Kawase** - Similar to Dual Kawase, but with separate
-  horizontal/vertical passes for different X/Y radii; has configurable sample weights.
-  It looks a bit shit, TBH.
 
 ### Fast Gaussian
 
@@ -84,8 +81,7 @@ odd-sized resampling consistent across transition boundaries. Each is reconstruc
 resize appearing or disappearing at a boundary. Kernel tails taper smoothly as
 the tap count changes. This prioritizes smooth radius changes and a rounded blur
 shape over exact Gaussian matching; resampling still introduces some phase-dependent
-shape variation. Radius sliders use steps of 1; disable
-"Snap to 3×2ⁿ" when evaluating smooth changes.
+shape variation. Radius sliders use steps of 1.
 
 To run WebGPU regression checks, serve the repository and open
 `tests/reduced-gaussian.html`. It checks HDR/alpha preservation, zero-radius axes,
@@ -115,9 +111,6 @@ at the smallest shared level. Anisotropic interpolation also shares pyramid work
 before the common upsampling, but can require additional passes. Interpolation
 is continuous; its slope can change at triangle and discrete-step boundaries.
 
-Split Kawase explores a separable version of Dual Kawase, using 1D horizontal
-and vertical filters. Its visual quality is currently unsatisfactory.
-
 Test inputs are available in the `exr/` folder.
 
 ### GPU timing
@@ -132,8 +125,7 @@ which can include scheduling delays and previously queued work.
 ### Features
 
 - Drag & drop or browse for images (PNG/JPG/EXR),
-- Adjustable blur radius (X/Y can be locked or independent),
-- Split Kawase weight controls.
+- Adjustable blur radius (X/Y can be locked or independent).
 
 ### External code
 
