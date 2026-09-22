@@ -247,6 +247,7 @@ body {
             <label><input type="radio" name="blurMode" value="box"> Box</label>
             <label><input type="radio" name="blurMode" value="tent"> Tent</label>
             <label><input type="radio" name="blurMode" value="gaussian"> Gaussian</label>
+            <label><input type="radio" name="blurMode" value="fast_gaussian"> Fast Gaussian</label>
             <label><input type="radio" name="blurMode" value="reduced_gaussian"> Reduced Gaussian</label>
             <label><input type="radio" name="blurMode" value="dual_kawase" checked> Dual Kawase</label>
             <label><input type="radio" name="blurMode" value="split_kawase"> Split Kawase</label>
@@ -353,6 +354,7 @@ body {
 
 <script src="fflate.js"></script>
 <script src="exrloader.js"></script>
+<script src="fast-gaussian.js"></script>
 <script>
 // ================ Shaders
 const FULLSCREEN_VERTEX_SHADER = `
@@ -650,11 +652,11 @@ let selectedTextureIndex = -1; // -1 means "Blurred Output"
 
 // ================ Various helpers
 
-function createTexture2D(width, height) {
+function createTexture2D(width, height, extraUsage = 0) {
     return gpu_device.createTexture({
         size: [width, height],
         format: 'rgba32float',
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
+        usage: extraUsage | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
     });
 }
 
@@ -710,6 +712,7 @@ const BlurMode = {
     BOX: 'box',
     TENT: 'tent',
     GAUSSIAN: 'gaussian',
+    FAST_GAUSSIAN: 'fast_gaussian',
     REDUCED_GAUSSIAN: 'reduced_gaussian',
     DUAL_KAWASE: 'dual_kawase',
     SPLIT_KAWASE: 'split_kawase',
@@ -1060,17 +1063,18 @@ function separablePass(commandEncoder, input, output, mode, horizontal, radius) 
     // Resources (kernel texture, params buffer) will be garbage collected after GPU is done
 }
 
-function ensureBlurTextures(width, height) {
-    // Create or recreate temp and output textures if size changed
-    if (tex_blur_tmp && tex_blur_tmp.width === width && tex_blur_tmp.height === height) {
-        return;
+function ensureBlurTextures(width, height, outputExtraUsage = 0) {
+    if (!tex_blur_tmp || tex_blur_tmp.width !== width || tex_blur_tmp.height !== height) {
+        if (tex_blur_tmp) tex_blur_tmp.destroy();
+        tex_blur_tmp = createTexture2D(width, height);
     }
-
-    if (tex_blur_tmp) tex_blur_tmp.destroy();
-    if (tex_blurred) tex_blurred.destroy();
-
-    tex_blur_tmp = createTexture2D(width, height);
-    tex_blurred = createTexture2D(width, height);
+    // Recreate the output when switching between render and compute blur paths.
+    const storageUsage = outputExtraUsage & GPUTextureUsage.STORAGE_BINDING;
+    if (!tex_blurred || tex_blurred.width !== width || tex_blurred.height !== height ||
+        (tex_blurred.usage & GPUTextureUsage.STORAGE_BINDING) !== storageUsage) {
+        if (tex_blurred) tex_blurred.destroy();
+        tex_blurred = createTexture2D(width, height, outputExtraUsage);
+    }
 }
 
 // ================ Dual Kawase blur
@@ -1091,9 +1095,9 @@ function resetKawaseUniformBufferPool() {
     kawaseUniformBufferIndex = 0;
 }
 
-// Get a cached texture of given size (creates if not exists)
-function getCachedTexture(width, height) {
-    const key = `${width},${height}`;
+// Get a cached texture with matching dimensions and usage.
+function getCachedTexture(width, height, extraUsage = 0) {
+    const key = `${width},${height},${extraUsage}`;
     let textures = kawaseTextureCache.get(key);
     if (!textures) {
         textures = [];
@@ -1107,7 +1111,7 @@ function getCachedTexture(width, height) {
         }
     }
     // Create new texture
-    const texture = createTexture2D(width, height);
+    const texture = createTexture2D(width, height, extraUsage);
     textures.push({ texture, inUse: true });
     return texture;
 }
@@ -1673,7 +1677,7 @@ function beginBlurTiming(encoder) {
     return timing;
 }
 
-function beginBlurPass(encoder, descriptor) {
+function beginBlurPass(encoder, descriptor, compute = false) {
     const timing = blurTimings.get(encoder);
     if (timing) {
         descriptor.timestampWrites = {
@@ -1682,7 +1686,7 @@ function beginBlurPass(encoder, descriptor) {
             endOfPassWriteIndex: timing.count++,
         };
     }
-    return encoder.beginRenderPass(descriptor);
+    return compute ? encoder.beginComputePass(descriptor) : encoder.beginRenderPass(descriptor);
 }
 
 function endBlurTiming(encoder, timing) {
@@ -1737,7 +1741,9 @@ async function render() {
     if (width === 0 || height === 0) return;
 
     // Ensure blur textures exist
-    ensureBlurTextures(width, height);
+    const recursiveBlur = blur_params.mode === BlurMode.FAST_GAUSSIAN &&
+        Math.max(blur_params.radius_x, blur_params.radius_y) >= 9;
+    ensureBlurTextures(width, height, recursiveBlur ? GPUTextureUsage.STORAGE_BINDING : 0);
 
     // Reset resource pools for this frame
     resetKawaseUniformBufferPool();
@@ -1758,6 +1764,9 @@ async function render() {
     if (hasBlur) {
         if (blur_params.mode === BlurMode.DUAL_KAWASE) {
             blurDualKawase(commandEncoder, tex_source, tex_blurred);
+            blurredOutput = tex_blurred;
+        } else if (blur_params.mode === BlurMode.FAST_GAUSSIAN) {
+            blurFastGaussian(commandEncoder, tex_source, tex_blurred);
             blurredOutput = tex_blurred;
         } else if (blur_params.mode === BlurMode.REDUCED_GAUSSIAN) {
             blurReducedGaussian(commandEncoder, tex_source, tex_blurred);
