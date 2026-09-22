@@ -84,7 +84,7 @@ odd-sized resampling consistent across transition boundaries. Each is reconstruc
 resize appearing or disappearing at a boundary. Kernel tails taper smoothly as
 the tap count changes. This prioritizes smooth radius changes and a rounded blur
 shape over exact Gaussian matching; resampling still introduces some phase-dependent
-shape variation. Radius sliders accept fractional values (0.1 steps); disable
+shape variation. Radius sliders use steps of 1; disable
 "Snap to 3×2ⁿ" when evaluating smooth changes.
 
 To run WebGPU regression checks, serve the repository and open
