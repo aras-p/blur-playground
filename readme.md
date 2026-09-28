@@ -225,21 +225,17 @@ same grids and sampling path for the shared suffix, including on odd-sized image
 
 ### Performance
 
-**Render Video** time in seconds, doing an animated radius sweep, all on Chrome browser:
-
-The displayed time measures the full export, including rendering, canvas capture,
-H.264 encoding, and MP4 assembly. It is not an isolated GPU blur time, and there
-is no GPU timestamp readout. **Time no-op video** performs the same export with
-blur bypassed; it still renders and encodes the source image.
+**Render Video** time in seconds, doing an animated radius sweep on a 1920x1080 input image,
+all on Chrome browser:
 
 | Scenario | Apple M4 Max | RTX 3080Ti, Windows | Intel Iris Xe, Windows |
 |----------|-------------:|------:|-------:|
-|No blur          |  1.89 |  2.12 |   3.60 |
-|Gaussian         | 19.98 | 16.37 | 151.31 |
-|Fast Gaussian    |  2.80 |  2.83 |  10.89 |
-|Redux Gaussian |  2.11 |  2.23 |   4.63 |
-|Skia             |  2.03 |  2.32 |   4.59 |
-|Dual Kawase      |  2.26 |  2.41 |   6.01 |
+|No blur          |  1.41 |  0.98 |   2.71 |
+|Gaussian         | 19.52 | 15.47 | 151.07 |
+|Fast Gaussian    |  2.25 |  1.86 |  10.09 |
+|Redux Gaussian   |  1.55 |  1.11 |   3.63 |
+|Skia             |  1.47 |  1.15 |   3.58 |
+|Dual Kawase      |  1.72 |  1.23 |   4.89 |
 
 
 ### Features
