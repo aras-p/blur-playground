@@ -75,6 +75,19 @@ a zero-radius axis keeps its original resolution and is not filtered. Exact 2×
 downsampling uses one bilinear sample, including when only one axis is reduced;
 odd-sized reductions integrate pixel areas to preserve bright points. The residual
 Gaussian compensates approximately for reduction and reconstruction variance.
+
+Each reduced axis has a one-texel border on both sides. Reduction preserves the
+source edge/corner values there instead of extending averaged interior pixels;
+this avoids bright interiors contaminating the clamped boundary at large radii.
+The other axis still integrates its footprint along each edge. Padding is carried
+through every reduction and filtered with the image, then excluded from the
+logical dimensions used for sigma, level selection, and reconstruction coordinates.
+Unreduced axes need no padding. This follows the same boundary-preservation idea
+as Skia, while retaining the area reductions and reconstruction filters below.
+For example, an 8×5 logical level occupies a 10×7 texture when both axes reduce.
+This adds border pixels and coordinate calculations, but no additional render
+passes; exact 2× reductions still use one bilinear sample per output pixel.
+
 Reconstruction chooses per axis: bilinear for enlargement up to 2× (including
 odd-sized half-resolution images), positive cubic B-spline for coarser levels.
 This needs one bilinear sample when both axes use bilinear, two when only one

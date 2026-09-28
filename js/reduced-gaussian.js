@@ -38,24 +38,38 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 // Integrate each destination pixel's source footprint. Exact area weights
 // preserve isolated highlights even when odd dimensions change sampling phase.
 const REDUCED_DOWNSAMPLE_SHADER = FULLSCREEN_VERTEX_SHADER + `
-struct Params { outputSize: vec2f, }
+// xy is the logical size, zw is the one-texel padding on each axis.
+struct Params { source: vec4f, destination: vec4f, }
 @group(0) @binding(0) var smp: sampler;
 @group(0) @binding(1) var tex: texture_2d<f32>;
 @group(0) @binding(2) var<uniform> params: Params;
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    let size = vec2f(textureDimensions(tex));
-    // Exact halving is an area average with one bilinear sample. Unchanged
-    // axes stay at texel centers; fractional/odd reductions use integration.
-    if (all((size == params.outputSize) | (size == 2.0 * params.outputSize))) {
-        return textureSampleLevel(tex, smp, in.position.xy / params.outputSize, 0.0);
+    let physicalSize = vec2f(textureDimensions(tex));
+    let size = params.source.xy;
+    let outputSize = params.destination.xy;
+    let scale = size / outputSize;
+    let pixel = floor(in.position.xy) - params.destination.zw;
+    var lo = pixel * scale + params.source.zw;
+    var hi = min((pixel + 1.0) * scale, size) + params.source.zw;
+    // Copy the source's outermost row/column into the border. On later
+    // reductions these are the preserved edges, not averaged interior texels.
+    // The other axis still integrates its footprint, including at corners.
+    for (var axis = 0u; axis < 2u; axis++) {
+        if (pixel[axis] < 0.0) {
+            lo[axis] = 0.0;
+            hi[axis] = 1.0;
+        } else if (pixel[axis] >= outputSize[axis]) {
+            lo[axis] = physicalSize[axis] - 1.0;
+            hi[axis] = physicalSize[axis];
+        }
     }
-    let scale = size / params.outputSize;
-    let pixel = floor(in.position.xy);
-    let lo = pixel * scale;
-    let hi = min((pixel + 1.0) * scale, size);
+    // Exact halves, unchanged axes, and their borders need one bilinear read.
+    if (all((size == outputSize) | (size == 2.0 * outputSize))) {
+        return textureSampleLevel(tex, smp, (lo + hi) * 0.5 / physicalSize, 0.0);
+    }
     var col = vec4f(0.0);
-    // Each axis spans at most three source texels (one if it is unchanged).
+    // Each axis spans at most three source texels (one on a border).
     for (var y = i32(floor(lo.y)); y < i32(ceil(hi.y)); y++) {
         for (var x = i32(floor(lo.x)); x < i32(ceil(hi.x)); x++) {
             let overlap = max(vec2f(0.0), min(hi, vec2f(f32(x + 1), f32(y + 1)))
@@ -63,14 +77,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
             col += textureLoad(tex, vec2i(x, y), 0) * overlap.x * overlap.y;
         }
     }
-    return col / (scale.x * scale.y);
+    let area = hi - lo;
+    return col / (area.x * area.y);
 }
 `;
 
 // Reconstruct and blend all RGBA channels, without using alpha as a weight.
 const REDUCED_MIX_SHADER = FULLSCREEN_VERTEX_SHADER + `
 override ALL_BILINEAR: bool = false;
-struct Params { ratio: vec2f, outputSize: vec2f, }
+struct Params {
+    ratio: vec2f, outputSize: vec2f,
+    base: vec4f, neighbor: vec4f, diagonal: vec4f,
+}
 @group(0) @binding(0) var smp: sampler;
 @group(0) @binding(1) var tex: texture_2d<f32>;
 @group(0) @binding(2) var<uniform> params: Params;
@@ -94,20 +112,24 @@ fn cubicAxis(uv: f32, size: f32, outputSize: f32) -> vec3f {
     return vec3f((base - 0.5 + w1 / g0) / size,
                  (base + 1.5 + w3 / g1) / size, g1);
 }
-fn reconstruct(image: texture_2d<f32>, uv: vec2f) -> vec4f {
+// Coordinates and filter selection use the logical image, excluding padding.
+fn paddedUV(uv: vec2f, imageBounds: vec4f) -> vec2f {
+    return (uv * imageBounds.xy + imageBounds.zw) / (imageBounds.xy + 2.0 * imageBounds.zw);
+}
+fn reconstruct(image: texture_2d<f32>, uv: vec2f, imageBounds: vec4f) -> vec4f {
     // Pipeline specialization removes the cubic path for all-bilinear draws.
-    if (ALL_BILINEAR) { return textureSampleLevel(image, smp, uv, 0.0); }
-    let size = vec2f(textureDimensions(image));
+    if (ALL_BILINEAR) { return textureSampleLevel(image, smp, paddedUV(uv, imageBounds), 0.0); }
+    let size = imageBounds.xy;
     let x = cubicAxis(uv.x, size.x, params.outputSize.x);
     let y = cubicAxis(uv.y, size.y, params.outputSize.y);
-    var a = textureSampleLevel(image, smp, vec2f(x.x, y.x), 0.0);
+    var a = textureSampleLevel(image, smp, paddedUV(vec2f(x.x, y.x), imageBounds), 0.0);
     if (2.0 * size.x < params.outputSize.x) {
-        a = mix(a, textureSampleLevel(image, smp, vec2f(x.y, y.x), 0.0), x.z);
+        a = mix(a, textureSampleLevel(image, smp, paddedUV(vec2f(x.y, y.x), imageBounds), 0.0), x.z);
     }
     if (2.0 * size.y < params.outputSize.y) {
-        var b = textureSampleLevel(image, smp, vec2f(x.x, y.y), 0.0);
+        var b = textureSampleLevel(image, smp, paddedUV(vec2f(x.x, y.y), imageBounds), 0.0);
         if (2.0 * size.x < params.outputSize.x) {
-            b = mix(b, textureSampleLevel(image, smp, vec2f(x.y, y.y), 0.0), x.z);
+            b = mix(b, textureSampleLevel(image, smp, paddedUV(vec2f(x.y, y.y), imageBounds), 0.0), x.z);
         }
         a = mix(a, b, y.z);
     }
@@ -116,12 +138,12 @@ fn reconstruct(image: texture_2d<f32>, uv: vec2f) -> vec4f {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     // Triangle weights: base, dominant-axis neighbor, diagonal neighbor.
-    var color = reconstruct(tex, in.uv) * (1.0 - params.ratio.x - params.ratio.y);
+    var color = reconstruct(tex, in.uv, params.base) * (1.0 - params.ratio.x - params.ratio.y);
     if (params.ratio.x > 0.0) {
-        color += reconstruct(texX, in.uv) * params.ratio.x;
+        color += reconstruct(texX, in.uv, params.neighbor) * params.ratio.x;
     }
     if (params.ratio.y > 0.0) {
-        color += reconstruct(texY, in.uv) * params.ratio.y;
+        color += reconstruct(texY, in.uv, params.diagonal) * params.ratio.y;
     }
     return color;
 }
@@ -211,7 +233,8 @@ function blurReducedGaussian(encoder, input, output) {
     // levels abruptly at the existing reduction thresholds.
     if (blur_params.disable_reduced_blending) x.blend = y.blend = 0;
     const levels = new Map();
-    levels.set('0,0', { texture: input, vx: 0, vy: 0 });
+    levels.set('0,0', { texture: input, width: input.width, height: input.height,
+        padX: 0, padY: 0, vx: 0, vy: 0 });
     // Share a canonical reduction tree between at most three endpoints.
     function down(lx, ly) {
         const key = `${lx},${ly}`;
@@ -226,11 +249,15 @@ function blurReducedGaussian(encoder, input, output) {
         const src = prev.texture;
         const width = Math.ceil(input.width / 2 ** lx);
         const height = Math.ceil(input.height / 2 ** ly);
-        const texture = getCachedTexture(width, height);
+        // Only reduced axes need padding; zero-radius axes keep exact texels.
+        const padX = lx > 0 ? 1 : 0;
+        const padY = ly > 0 ? 1 : 0;
+        const texture = getCachedTexture(width + 2 * padX, height + 2 * padY);
         reducedPass(encoder, pip_reduced_down, src, texture,
-            new Float32Array([width, height]));
+            new Float32Array([prev.width, prev.height, prev.padX, prev.padY,
+                width, height, padX, padY]));
         // Box reduction variance in original texels; approximate for odd sizes.
-        const entry = { texture,
+        const entry = { texture, width, height, padX, padY,
             vx: ((input.width / width) ** 2 - 1) / 12,
             vy: ((input.height / height) ** 2 - 1) / 12,
         };
@@ -240,8 +267,8 @@ function blurReducedGaussian(encoder, input, output) {
     }
     function endpoint(lx, ly, destination = null) {
         const entry = down(lx, ly);
-        const sx = input.width / entry.texture.width;
-        const sy = input.height / entry.texture.height;
+        const sx = input.width / entry.width;
+        const sy = input.height / entry.height;
         const sigmaX = Math.sqrt(Math.max(0, x.sigma ** 2 - entry.vx - reconstructionVariance(sx))) / sx;
         const sigmaY = Math.sqrt(Math.max(0, y.sigma ** 2 - entry.vy - reconstructionVariance(sy))) / sy;
         const filterY = sigmaY >= 0.01 && entry.texture.height > 1;
@@ -249,7 +276,7 @@ function blurReducedGaussian(encoder, input, output) {
             filterY ? null : destination);
         tex = reducedGaussianAxis(encoder, tex, sigmaY, false, destination);
         intermediateTextures.push({ texture: tex, name: `Gaussian ${tex.width}×${tex.height}` });
-        return tex;
+        return { ...entry, texture: tex };
     }
     // Reconstruct each endpoint directly on the output grid. An intermediate
     // resize here would add blur that disappears at the level boundary.
@@ -259,8 +286,8 @@ function blurReducedGaussian(encoder, input, output) {
     const a = endpoint(x.level, y.level, direct ? output : null);
     if (direct) {
         // Both axes can be bypassed for zero/tiny radii or one-pixel images.
-        if (a !== output) encoder.copyTextureToTexture(
-            { texture: a }, { texture: output }, [output.width, output.height]);
+        if (a.texture !== output) encoder.copyTextureToTexture(
+            { texture: a.texture }, { texture: output }, [output.width, output.height]);
         return;
     }
     const middleWeight = Math.abs(x.blend - y.blend);
@@ -275,7 +302,9 @@ function blurReducedGaussian(encoder, input, output) {
     // coarser neighbors during transitions, before choosing the simple shader.
     const allBilinear = [a, b, c].every(tex =>
         2 * tex.width >= output.width && 2 * tex.height >= output.height);
-    reducedPass(encoder, allBilinear ? pip_reduced_mix_bilinear : pip_reduced_mix, a, output,
-        new Float32Array([middleWeight, diagonalWeight, output.width, output.height]), [b, c]);
+    const bounds = entry => [entry.width, entry.height, entry.padX, entry.padY];
+    reducedPass(encoder, allBilinear ? pip_reduced_mix_bilinear : pip_reduced_mix, a.texture, output,
+        new Float32Array([middleWeight, diagonalWeight, output.width, output.height,
+            ...bounds(a), ...bounds(b), ...bounds(c)]), [b.texture, c.texture]);
 }
 
