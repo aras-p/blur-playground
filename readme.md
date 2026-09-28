@@ -85,7 +85,12 @@ full-resolution output once. When no resizing or blending is needed, the final
 Gaussian pass writes directly to the output and reconstruction is skipped.
 
 Before an axis changes resolution, a smoothstep crossfade blends two approximations
-of the **same target blur**. Transitions use triangular interpolation: at most three small Gaussian results,
+of the **same target blur**. The blending range is **sigma 5–6 in the current
+level's texels**, before variance compensation: `sigma = radius / 3`, divided by
+the actual reduction scale for that axis. Blending starts at 5 and the axis
+switches to the next level at 6; below 5, neighboring endpoints are skipped.
+The **Disable blending between levels** checkbox skips the crossfade entirely.
+Transitions use triangular interpolation: at most three small Gaussian results,
 and only two when the X/Y transition fractions match. A canonical reduction tree
 reduces both axes together first, then any remaining axis, so neighboring endpoints
 share the expensive large-image downsample prefix. The fixed route also keeps

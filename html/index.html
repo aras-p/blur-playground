@@ -178,6 +178,10 @@ body {
     font-size: 14px;
     cursor: pointer;
 }
+.checkbox-row input:disabled + label {
+    color: #555;
+    cursor: default;
+}
 </style>
 </head>
 <body>
@@ -203,6 +207,10 @@ body {
             <label><input type="radio" name="blurMode" value="reduced_gaussian" checked> Reduced Gaussian</label>
             <label><input type="radio" name="blurMode" value="skia_gaussian"> Skia Gaussian</label>
             <label><input type="radio" name="blurMode" value="dual_kawase"> Dual Kawase</label>
+        </div>
+        <div class="checkbox-row">
+            <input type="checkbox" id="disableReducedBlending">
+            <label for="disableReducedBlending">Disable blending between levels</label>
         </div>
     </div>
 
@@ -596,6 +604,7 @@ const BlurMode = {
 
 const blur_params = {
     mode: BlurMode.REDUCED_GAUSSIAN,
+    disable_reduced_blending: false,
     radius_x: 96,
     radius_y: 96,
     lock_radius: false,
@@ -1246,7 +1255,7 @@ function reducedAxisPlan(radius, size) {
     const maxLevel = Math.ceil(Math.log2(size));
     const scale = level => size / Math.ceil(size / 2 ** level);
     while (level < maxLevel && sigma >= 6 * scale(level)) level++;
-    const t = Math.min(1, Math.max(0, (sigma / scale(level) - 4.5) / 1.5));
+    const t = Math.min(1, Math.max(0, sigma / scale(level) - 5));
     return { sigma, level, blend: level < maxLevel ? t * t * (3 - 2 * t) : 0 };
 }
 
@@ -1290,6 +1299,9 @@ function reconstructionVariance(scale) {
 function blurReducedGaussian(encoder, input, output) {
     const x = reducedAxisPlan(blur_params.radius_x, input.width);
     const y = reducedAxisPlan(blur_params.radius_y, input.height);
+    // Keep the selected levels, but skip neighboring endpoints and switch
+    // levels abruptly at the existing reduction thresholds.
+    if (blur_params.disable_reduced_blending) x.blend = y.blend = 0;
     const levels = new Map();
     levels.set('0,0', { texture: input, vx: 0, vy: 0 });
     // Share a canonical reduction tree between at most three endpoints.
@@ -1580,9 +1592,17 @@ function setupEventHandlers() {
     });
 
     // Blur mode radio buttons
+    const disableReducedBlending = document.getElementById('disableReducedBlending');
+    disableReducedBlending.disabled = blur_params.mode !== BlurMode.REDUCED_GAUSSIAN;
+    disableReducedBlending.addEventListener('change', (e) => {
+        blur_params.disable_reduced_blending = e.target.checked;
+        resetTextureSelection();
+        onBlurParamsChanged();
+    });
     document.querySelectorAll('input[name="blurMode"]').forEach(radio => {
         radio.addEventListener('change', (e) => {
             blur_params.mode = e.target.value;
+            disableReducedBlending.disabled = blur_params.mode !== BlurMode.REDUCED_GAUSSIAN;
             // Reset texture selection to final output when blur mode changes
             resetTextureSelection();
             onBlurParamsChanged();
