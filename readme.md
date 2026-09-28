@@ -248,7 +248,8 @@ blur bypassed; it still renders and encodes the source image.
 - Adjustable blur radius (X/Y can be locked or independent).
 - Inspect the source, intermediate textures, or final output with **Display Texture**.
 - **Animate** loops an eight-second radius sweep, respecting the X/Y lock.
-- **Render Video** exports an eight-second, 60 fps H.264 MP4 using WebCodecs.
+- **Render Video** exports an eight-second, 60 fps H.264 MP4 using WebCodecs,
+  reduced to 960px on the longer axis. Blur itself stays at the image resolution.
 
 ### External code
 

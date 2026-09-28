@@ -4,11 +4,17 @@ const BLUR_ANIMATION_DURATION = 8000;
 async function exportBlurVideo({ canvas, renderFrame, onProgress }) {
     const fps = 60;
     const frameCount = BLUR_ANIMATION_DURATION / 1000 * fps;
-    // AVC needs even dimensions. Pad odd images by one pixel, without resizing.
+    // Scale only the export; blur rendering stays at the source resolution.
+    const scale = Math.min(1, 960 / Math.max(canvas.width, canvas.height));
+    const width = Math.max(1, Math.round(canvas.width * scale));
+    const height = Math.max(1, Math.round(canvas.height * scale));
+    // AVC needs even dimensions. Pad odd sizes by one pixel after scaling.
     const capture = document.createElement('canvas');
-    capture.width = Math.ceil(canvas.width / 2) * 2;
-    capture.height = Math.ceil(canvas.height / 2) * 2;
+    capture.width = Math.ceil(width / 2) * 2;
+    capture.height = Math.ceil(height / 2) * 2;
     const context = capture.getContext('2d', { alpha: false });
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = 'high';
     let config;
     // Baseline H.264 excludes B-frames, so decode order equals presentation order.
     // Try levels 4.2 (1080p60) and 5.2 (4K60), checking the actual dimensions.
@@ -16,7 +22,7 @@ async function exportBlurVideo({ canvas, renderFrame, onProgress }) {
         for (const codec of ['avc1.42002a', 'avc1.420034']) {
             const candidate = {
                 codec, width: capture.width, height: capture.height,
-                bitrate: 8_000_000, bitrateMode: 'variable', framerate: fps,
+                bitrate: 3_000_000, bitrateMode: 'variable', framerate: fps,
                 hardwareAcceleration, latencyMode: 'quality', avc: { format: 'avc' },
             };
             if ((await VideoEncoder.isConfigSupported(candidate)).supported) {
@@ -56,7 +62,7 @@ async function exportBlurVideo({ canvas, renderFrame, onProgress }) {
         for (let i = 0; i < frameCount; i++) {
             if (encodingError) throw encodingError;
             await renderFrame(i * 1000 / fps, () => {
-                context.drawImage(canvas, 0, 0);
+                context.drawImage(canvas, 0, 0, width, height);
                 const timestamp = Math.round(i * 1_000_000 / fps);
                 const frame = new VideoFrame(capture, {
                     timestamp, duration: Math.round((i + 1) * 1_000_000 / fps) - timestamp,
