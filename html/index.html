@@ -385,11 +385,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 // preserve isolated highlights even when odd dimensions change sampling phase.
 const REDUCED_DOWNSAMPLE_SHADER = FULLSCREEN_VERTEX_SHADER + `
 struct Params { outputSize: vec2f, }
+@group(0) @binding(0) var smp: sampler;
 @group(0) @binding(1) var tex: texture_2d<f32>;
 @group(0) @binding(2) var<uniform> params: Params;
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let size = vec2f(textureDimensions(tex));
+    // Exact halving is an area average with one bilinear sample. Unchanged
+    // axes stay at texel centers; fractional/odd reductions use integration.
+    if (all((size == params.outputSize) | (size == 2.0 * params.outputSize))) {
+        return textureSampleLevel(tex, smp, in.position.xy / params.outputSize, 0.0);
+    }
     let scale = size / params.outputSize;
     let pixel = floor(in.position.xy);
     let lo = pixel * scale;
@@ -1213,7 +1219,7 @@ function reducedPass(encoder, pipeline, input, output, data, other = null) {
         { binding: 1, resource: input.createView() },
         { binding: 2, resource: { buffer } },
     ];
-    if (pipeline !== pip_reduced_down) entries.push({ binding: 0, resource: gpu_sampler_linear });
+    entries.push({ binding: 0, resource: gpu_sampler_linear });
     if (other) other.forEach((tex, i) => entries.push({ binding: 3 + i, resource: tex.createView() }));
     const pass = encoder.beginRenderPass({colorAttachments: [{
         view: output.createView(), loadOp: 'clear', storeOp: 'store',
@@ -1238,7 +1244,7 @@ function reducedAxisPlan(radius, size) {
     return { sigma, level, blend: level < maxLevel ? t * t * (3 - 2 * t) : 0 };
 }
 
-function reducedGaussianAxis(encoder, input, sigma, horizontal) {
+function reducedGaussianAxis(encoder, input, sigma, horizontal, destination = null) {
     if (sigma < 0.01 || (horizontal ? input.width : input.height) === 1) return input;
     const data = new Float32Array(52);
     data[0] = horizontal ? 1 / input.width : 0;
@@ -1262,7 +1268,7 @@ function reducedGaussianAxis(encoder, input, sigma, horizontal) {
     data[2] = 1 / sum;
     data[3] = count;
     for (let j = 0; j < count; j++) data[5 + j * 4] /= sum;
-    const output = getCachedTexture(input.width, input.height);
+    const output = destination ?? getCachedTexture(input.width, input.height);
     reducedPass(encoder, pip_reduced_gaussian, input, output, data);
     return output;
 }
@@ -1298,7 +1304,7 @@ function blurReducedGaussian(encoder, input, output) {
         intermediateTextures.push({ texture, name: `Reduced ${width}×${height}` });
         return entry;
     }
-    function endpoint(lx, ly) {
+    function endpoint(lx, ly, destination = null) {
         const entry = down(lx, ly);
         const sx = input.width / entry.texture.width;
         const sy = input.height / entry.texture.height;
@@ -1306,14 +1312,25 @@ function blurReducedGaussian(encoder, input, output) {
         // Unchanged axes bypass reconstruction entirely.
         const sigmaX = Math.sqrt(Math.max(0, x.sigma ** 2 - entry.vx - (sx > 1 ? sx * sx / 3 : 0))) / sx;
         const sigmaY = Math.sqrt(Math.max(0, y.sigma ** 2 - entry.vy - (sy > 1 ? sy * sy / 3 : 0))) / sy;
-        let tex = reducedGaussianAxis(encoder, entry.texture, sigmaX, true);
-        tex = reducedGaussianAxis(encoder, tex, sigmaY, false);
+        const filterY = sigmaY >= 0.01 && entry.texture.height > 1;
+        let tex = reducedGaussianAxis(encoder, entry.texture, sigmaX, true,
+            filterY ? null : destination);
+        tex = reducedGaussianAxis(encoder, tex, sigmaY, false, destination);
         intermediateTextures.push({ texture: tex, name: `Gaussian ${tex.width}×${tex.height}` });
         return tex;
     }
     // Reconstruct each endpoint directly on the output grid. An intermediate
     // resize here would add blur that disappears at the level boundary.
-    const a = endpoint(x.level, y.level);
+    // With no resizing or blending, write the final Gaussian axis directly
+    // to the output instead of running a full-resolution reconstruction pass.
+    const direct = x.level === 0 && y.level === 0 && x.blend === 0 && y.blend === 0;
+    const a = endpoint(x.level, y.level, direct ? output : null);
+    if (direct) {
+        // Both axes can be bypassed for zero/tiny radii or one-pixel images.
+        if (a !== output) encoder.copyTextureToTexture(
+            { texture: a }, { texture: output }, [output.width, output.height]);
+        return;
+    }
     const middleWeight = Math.abs(x.blend - y.blend);
     const diagonalWeight = Math.min(x.blend, y.blend);
     // Split the blend square along (0,0)--(1,1). On that diagonal only

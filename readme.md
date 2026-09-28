@@ -63,8 +63,9 @@ tiny images, and timestamp coverage. Regenerate fixtures with
 
 Radius maps approximately to three Gaussian standard deviations, like the existing
 Gaussian mode. Each axis reduces independently to keep the working sigma small;
-a zero-radius axis keeps its original resolution and is not filtered. Downsampling
-integrates pixel areas to preserve bright points on odd-sized images. The residual
+a zero-radius axis keeps its original resolution and is not filtered. Exact 2×
+downsampling uses one bilinear sample, including when only one axis is reduced;
+odd-sized reductions integrate pixel areas to preserve bright points. The residual
 Gaussian compensates approximately for reduction and reconstruction variance.
 Reconstruction uses a positive cubic B-spline (four bilinear samples in 2D,
 two in 1D), removing coarse-grid slope discontinuities without ringing around
@@ -73,7 +74,8 @@ HDR highlights. Unreduced axes bypass cubic filtering to preserve sharp detail.
 Gaussian samples are paired using bilinear filtering, with at most 25 texture
 reads per pixel per axis. Textures and uniform buffers are reused. Reduction
 prefixes are shared between transition paths, and reconstruction writes the
-full-resolution output once.
+full-resolution output once. When no resizing or blending is needed, the final
+Gaussian pass writes directly to the output and reconstruction is skipped.
 
 Before an axis changes resolution, a smoothstep crossfade blends two approximations
 of the **same target blur**. Transitions use triangular interpolation: at most three small Gaussian results,
