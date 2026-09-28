@@ -158,8 +158,12 @@ struct Params {
 // two texel centers, multiplied by w0+w1, equals their weighted sum. Pairing
 // four taps this way needs two linear reads per cubic axis (four in 2D).
 // Each axis returns (first position, second position, second group weight).
-fn cubicAxis(uv: f32, size: f32, outputSize: f32) -> vec3f {
-    if (2.0 * size >= outputSize) { return vec3f(uv, uv, 0.0); }
+fn cubicAxis(uv: f32, size: f32, outputSize: f32, pad: f32) -> vec3f {
+    let invPhysical = 1.0 / (size + 2.0 * pad);
+    if (2.0 * size >= outputSize) {
+        let p = (uv * size + pad) * invPhysical;
+        return vec3f(p, p, 0.0);
+    }
     let p = uv * size - 0.5;
     let base = floor(p);
     let f = p - base;
@@ -169,8 +173,8 @@ fn cubicAxis(uv: f32, size: f32, outputSize: f32) -> vec3f {
     let w3 = f * f * f / 6.0;
     let g0 = w0 + w1;
     let g1 = w2 + w3;
-    return vec3f((base - 0.5 + w1 / g0) / size,
-                 (base + 1.5 + w3 / g1) / size, g1);
+    return vec3f((base - 0.5 + w1 / g0 + pad) * invPhysical,
+                 (base + 1.5 + w3 / g1 + pad) * invPhysical, g1);
 }
 // Coordinates and filter selection use the logical image, excluding padding.
 fn paddedUV(uv: vec2f, imageBounds: vec4f) -> vec2f {
@@ -180,16 +184,16 @@ fn reconstruct(image: texture_2d<f32>, uv: vec2f, imageBounds: vec4f) -> vec4f {
     // Pipeline specialization removes the cubic path for all-bilinear draws.
     if (ALL_BILINEAR) { return textureSampleLevel(image, smp, paddedUV(uv, imageBounds), 0.0); }
     let size = imageBounds.xy;
-    let x = cubicAxis(uv.x, size.x, params.outputSize.x);
-    let y = cubicAxis(uv.y, size.y, params.outputSize.y);
-    var a = textureSampleLevel(image, smp, paddedUV(vec2f(x.x, y.x), imageBounds), 0.0);
+    let x = cubicAxis(uv.x, size.x, params.outputSize.x, imageBounds.z);
+    let y = cubicAxis(uv.y, size.y, params.outputSize.y, imageBounds.w);
+    var a = textureSampleLevel(image, smp, vec2f(x.x, y.x), 0.0);
     if (2.0 * size.x < params.outputSize.x) {
-        a = mix(a, textureSampleLevel(image, smp, paddedUV(vec2f(x.y, y.x), imageBounds), 0.0), x.z);
+        a = mix(a, textureSampleLevel(image, smp, vec2f(x.y, y.x), 0.0), x.z);
     }
     if (2.0 * size.y < params.outputSize.y) {
-        var b = textureSampleLevel(image, smp, paddedUV(vec2f(x.x, y.y), imageBounds), 0.0);
+        var b = textureSampleLevel(image, smp, vec2f(x.x, y.y), 0.0);
         if (2.0 * size.x < params.outputSize.x) {
-            b = mix(b, textureSampleLevel(image, smp, paddedUV(vec2f(x.y, y.y), imageBounds), 0.0), x.z);
+            b = mix(b, textureSampleLevel(image, smp, vec2f(x.y, y.y), 0.0), x.z);
         }
         a = mix(a, b, y.z);
     }
