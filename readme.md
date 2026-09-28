@@ -67,9 +67,16 @@ a zero-radius axis keeps its original resolution and is not filtered. Exact 2×
 downsampling uses one bilinear sample, including when only one axis is reduced;
 odd-sized reductions integrate pixel areas to preserve bright points. The residual
 Gaussian compensates approximately for reduction and reconstruction variance.
-Reconstruction uses a positive cubic B-spline (four bilinear samples in 2D,
-two in 1D), removing coarse-grid slope discontinuities without ringing around
-HDR highlights. Unreduced axes bypass cubic filtering to preserve sharp detail.
+Reconstruction chooses per axis: bilinear for enlargement up to 2× (including
+odd-sized half-resolution images), positive cubic B-spline for coarser levels.
+This needs one bilinear sample when both axes use bilinear, two when only one
+needs cubic, and four when both do. Cubic removes coarse-grid slope discontinuities
+without ringing around HDR highlights. Variance compensation follows the chosen
+filter; unreduced axes preserve sharp detail. Filter choice depends on endpoint
+dimensions, so the existing crossfade also blends changes in reconstruction.
+An `ALL_BILINEAR` WebGPU pipeline constant specializes reconstruction when all
+contributing endpoints use bilinear on both axes; other draws use the general
+hybrid shader. Both variants are created during initialization.
 
 Gaussian samples are paired using bilinear filtering, with at most 25 texture
 reads per pixel per axis. Textures and uniform buffers are reused. Reduction
