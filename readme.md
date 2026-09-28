@@ -7,6 +7,20 @@ In order to load provided sample image files, just opening the HTML page
 in a browser won't work. Easiest is then to run `python3 -m http.server 8000`
 and go to `http://localhost:8000/index.html`.
 
+### Code layout
+
+`index.html` contains the UI, image loading, and rendering orchestration.
+Blur shaders, pipelines, and algorithm helpers live in `js/`:
+
+- `separable-blur.js`: Box, Tent, and Gaussian; Fast Gaussian also uses this for small radii.
+- `reduced-gaussian.js`: Reduced Gaussian.
+- `dual-kawase.js`: Dual Kawase.
+- `fast-gaussian.js` and `skia-gaussian.js`: Fast and Skia Gaussian.
+- `gpu-helpers.js`: shared fullscreen vertex shader, GPU resource helpers, and texture cache.
+
+The files use classic scripts with shared globals; GPU helpers load before the
+blur implementations, and the page initializes their pipelines after creating the device.
+
 ### Blur Algorithms
 
 - **Box**, **Tent**, **Gaussian** - separable blurs
