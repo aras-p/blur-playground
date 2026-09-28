@@ -19,6 +19,9 @@ and go to `http://localhost:8000/html/index.html`.
 - **Reduced Gaussian** - independent X/Y area downsampling, followed by small
   separable Gaussian filters and cubic B-spline reconstruction. Uses just the radius
   controls; working resolution and filter widths are chosen internally.
+- **Skia Gaussian** - Skia’s GPU image-filter approach: progressive bilinear
+  downsampling, a small Gaussian, and bilinear reconstruction. Supports independent
+  X/Y radii; see implementation and validation details below.
 - **Dual Kawase** - multi-pass downsample/upsample pyramid blur, from
   Marius Bjørge, [Bandwidth-Efficient Rendering](https://community.arm.com/cfs-file/__key/communityserver-blogs-components-weblogfiles/00-00-00-20-66/siggraph2015_2D00_mmg_2D00_marius_2D00_notes.pdf) (SIGGRAPH 2015),
   see also explanation in [this blog post](https://blog.frost.kiwi/dual-kawase/#dual-kawase-blur).
@@ -89,6 +92,47 @@ odd and tiny images, impulse energy/anisotropy, and radius transitions. It also
 reports a warmed-up 1080p comparison with the existing Gaussian, including CPU
 encoding and GPU completion time rather than isolated shader time.
 
+### Skia Gaussian
+
+Adapted from Google Skia revision `da51f0d60e`, matching the pinned native renderer
+in `skia/`. This is a WebGPU implementation of the algorithm, not a Skia/WASM wrapper.
+The relevant source is [SkImageFilterTypes.cpp](https://github.com/google/skia/blob/da51f0d60e/src/core/SkImageFilterTypes.cpp)
+(`FilterResult::rescale` / `Builder::blur`) and
+[SkBlurEngine.cpp](https://github.com/google/skia/blob/da51f0d60e/src/core/SkBlurEngine.cpp)
+(`SkShaderBlurAlgorithm`).
+
+- Radius maps to sigma = radius / 3; sigma at or below 0.03 bypasses that axis.
+- Each axis reduces independently to a working sigma of at most 4. Intermediate
+  steps halve the scale; the last step uses the remaining fractional scale.
+  Skia's near-identity final-step collapse is preserved.
+- Logical bounds remain fractional and scaling is centered. A one-pixel border
+  preserves clamped edge/corner values through downsampling, including odd sizes.
+- The normalized Gaussian has radius ceil(3 × sigma). Small 2D kernels (up to
+  28 samples) use one pass; others use separable, bilinear-paired 1D taps.
+- A single bilinear upscale reconstructs the result. There is no variance
+  compensation, cubic reconstruction, tap taper, or transition crossfade.
+  This deliberately retains Skia's radius-dependent approximation changes.
+
+Only whole-image blur with clamped edges is implemented. The existing HDR
+RGBA32F texture format is retained, whereas the native Metal reference uses
+RGBA16F. Half-float rounding and GPU sampler precision mean results are not
+bit-identical. Temporary textures and uniforms are reused, with the texture pool
+bounded to the current pass chain rather than every size visited during animation.
+All filtering/resampling render passes participate in the GPU timing readout.
+
+Serve the repository and open `tests/skia-gaussian.html` for synthetic GPU checks
+and nine representative native EXR comparisons. Append `?all` to compare all 80
+frames in `skia/frames-blender-radius` (generate them using the commands in
+`skia/README.md` first). Checks cover constant HDR/alpha, tiny/odd/1D images,
+zero-radius axes, small kernels against independent scalar convolution, GPU
+validation, and timestamp coverage.
+
+On the tested Apple GPU/browser, all 80 frames passed: worst per-frame RGB
+relative L2 error was **0.0832%**, and worst maximum absolute RGB difference divided
+by that frame's peak was **0.1904%**. These metrics compare linear HDR values,
+before display conversion. Reference checks allow 0.2% and 0.5%, respectively;
+the scalar paired-sampling test allows hardware bilinear-weight quantization.
+
 ### Dual Kawase interpolation
 
 Dual Kawase is the main focus of this playground. The basic algorithm works well;
@@ -128,6 +172,9 @@ which can include scheduling delays and previously queued work.
 - Adjustable blur radius (X/Y can be locked or independent).
 
 ### External code
+
+- `html/skia-gaussian.js` adapts Skia algorithms (Google LLC, BSD-3-Clause);
+  see `html/skia-LICENSE.txt`.
 
 - `html/fast-gaussian.js` is adapted from Blender compositor code
   (Blender Authors, GPL-2.0-or-later); see its source header.

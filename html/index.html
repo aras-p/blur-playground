@@ -194,6 +194,7 @@ body {
             <label><input type="radio" name="blurMode" value="gaussian"> Gaussian</label>
             <label><input type="radio" name="blurMode" value="fast_gaussian"> Fast Gaussian</label>
             <label><input type="radio" name="blurMode" value="reduced_gaussian" checked> Reduced Gaussian</label>
+            <label><input type="radio" name="blurMode" value="skia_gaussian"> Skia Gaussian</label>
             <label><input type="radio" name="blurMode" value="dual_kawase"> Dual Kawase</label>
         </div>
     </div>
@@ -233,6 +234,7 @@ body {
 <script src="fflate.js"></script>
 <script src="exrloader.js"></script>
 <script src="fast-gaussian.js"></script>
+<script src="skia-gaussian.js"></script>
 <script>
 // ================ Shaders
 const FULLSCREEN_VERTEX_SHADER = `
@@ -478,6 +480,8 @@ let pip_dk_down = null;
 let pip_dk_up = null;
 /** @type {GPURenderPipeline} */
 let pip_dk_mix = null;
+/** @type {SkiaGaussian} */
+let skiaGaussian = null;
 /** @type {GPURenderPipeline} */
 let pip_reduced_gaussian = null;
 let pip_reduced_down = null;
@@ -562,6 +566,7 @@ const BlurMode = {
     GAUSSIAN: 'gaussian',
     FAST_GAUSSIAN: 'fast_gaussian',
     REDUCED_GAUSSIAN: 'reduced_gaussian',
+    SKIA_GAUSSIAN: 'skia_gaussian',
     DUAL_KAWASE: 'dual_kawase',
 };
 
@@ -610,6 +615,7 @@ async function initWebGPU() {
         pip_separable = createPipeline(SEPARABLE_BLUR_SHADER);
         pip_dk_down = createPipeline(DK_DOWNSAMPLE_SHADER);
         pip_dk_up = createPipeline(DK_UPSAMPLE_SHADER);
+        skiaGaussian = new SkiaGaussian(gpu_device, FULLSCREEN_VERTEX_SHADER, beginBlurPass);
         pip_reduced_gaussian = createPipeline(REDUCED_GAUSSIAN_SHADER);
         pip_reduced_down = createPipeline(REDUCED_DOWNSAMPLE_SHADER);
         pip_reduced_mix = createPipeline(REDUCED_MIX_SHADER);
@@ -1462,6 +1468,10 @@ async function render() {
             blurredOutput = tex_blurred;
         } else if (blur_params.mode === BlurMode.FAST_GAUSSIAN) {
             blurFastGaussian(commandEncoder, tex_source, tex_blurred);
+            blurredOutput = tex_blurred;
+        } else if (blur_params.mode === BlurMode.SKIA_GAUSSIAN) {
+            skiaGaussian.blur(commandEncoder, tex_source, tex_blurred,
+                blur_params.radius_x, blur_params.radius_y, intermediateTextures);
             blurredOutput = tex_blurred;
         } else if (blur_params.mode === BlurMode.REDUCED_GAUSSIAN) {
             blurReducedGaussian(commandEncoder, tex_source, tex_blurred);
