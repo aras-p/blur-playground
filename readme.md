@@ -171,14 +171,20 @@ is continuous; its slope can change at triangle and discrete-step boundaries.
 
 Test inputs are available in the `exr/` folder.
 
-### GPU timing
+### Performance
 
-The readout below the image shows `GPU blur: X.Yms`, summing timestamp queries
-on the blur render and compute passes. CPU work, uploads, display, texture copies, and readback
-are excluded. Results update asynchronously; browser timestamp precision and
-first-run warmup can affect small measurements. When `timestamp-query` is not
-available, `Blur queue: ~X.Yms` explicitly labels a queue-completion estimate,
-which can include scheduling delays and previously queued work.
+"Render Video" time in seconds, doing an animated radius sweep, all on Chrome browser:
+
+| Scenario | Apple M4 Max | RTX 3080Ti, Windows | Intel Iris Xe, Windows |
+|----------|-------------:|------:|-------:|
+|No blur          |  1.89 |  2.12 |   3.60 |
+|Gaussian         | 19.98 | 16.37 | 151.31 |
+|Fast Gaussian    |  2.80 |  2.83 |  10.89 |
+|Reduced Gaussian |  2.11 |  2.23 |   4.63 |
+|Skia             |  2.03 |  2.32 |   4.59 |
+|Dual Kawase      |  2.26 |  2.41 |   6.01 |
+
+
 
 ### Features
 

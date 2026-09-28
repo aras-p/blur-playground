@@ -1,5 +1,5 @@
 // Both live animation and export use this duration and the same radius function.
-const BLUR_ANIMATION_DURATION = 6000;
+const BLUR_ANIMATION_DURATION = 8000;
 
 async function exportBlurVideo({ canvas, renderFrame, onProgress }) {
     const fps = 60;
@@ -16,7 +16,7 @@ async function exportBlurVideo({ canvas, renderFrame, onProgress }) {
         for (const codec of ['avc1.42002a', 'avc1.420034']) {
             const candidate = {
                 codec, width: capture.width, height: capture.height,
-                bitrate: 12_000_000, framerate: fps,
+                bitrate: 8_000_000, bitrateMode: 'variable', framerate: fps,
                 hardwareAcceleration, latencyMode: 'quality', avc: { format: 'avc' },
             };
             if ((await VideoEncoder.isConfigSupported(candidate)).supported) {

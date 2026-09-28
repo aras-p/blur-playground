@@ -218,12 +218,12 @@ body {
         <label>Blur Radius</label>
         <div class="slider-row">
             <label for="radiusX">X:</label>
-            <input type="range" id="radiusX" min="0" max="500" step="1" value="96">
+            <input type="range" id="radiusX" min="0" max="1000" step="1" value="96">
             <span class="value" id="radiusXValue">96</span>
         </div>
         <div class="slider-row disabled" id="radiusYRow">
             <label for="radiusY">Y:</label>
-            <input type="range" id="radiusY" min="0" max="500" step="1" value="96">
+            <input type="range" id="radiusY" min="0" max="1000" step="1" value="96">
             <span class="value" id="radiusYValue">96</span>
         </div>
         <div class="checkbox-row">
@@ -1621,10 +1621,12 @@ function setupEventHandlers() {
     let animationStart = null;
 
     function setAnimatedRadius(elapsed) {
-        // Two seconds per leg: grow both axes, shrink X, then shrink Y.
+        // Grow together for the first third, then shrink both over the remainder.
+        // Y starts fast and slows down; X starts slow and catches up at the end.
         const phase = (elapsed / (BLUR_ANIMATION_DURATION / 3)) % 3;
-        const x = phase < 1 ? phase : phase < 2 ? 2 - phase : 0;
-        const y = blur_params.lock_radius ? x : phase < 1 ? phase : phase < 2 ? 1 : 3 - phase;
+        const shrink = Math.max(0, (phase - 1) / 2);
+        const x = phase < 1 ? phase : 1 - shrink ** 2;
+        const y = blur_params.lock_radius ? x : phase < 1 ? phase : (1 - shrink) ** 2;
         const min = Number(radiusX.min);
         const max = Number(radiusX.max);
         blur_params.radius_x = Math.round(min + x * (max - min));
@@ -1705,7 +1707,7 @@ function setupEventHandlers() {
             videoStatus.replaceChildren(download);
             download.click();
             const elapsed = ((performance.now() - started) / 1000).toFixed(2);
-            videoStatus.prepend(`${skipBlur ? 'No-op video' : 'Video'} rendered and encoded in ${elapsed}s (6s video, 60 fps). `);
+            videoStatus.prepend(`${skipBlur ? 'No-op video' : 'Video'} rendered and encoded in ${elapsed}s (${BLUR_ANIMATION_DURATION / 1000}s video, 60 fps). `);
         } catch (error) {
             videoStatus.textContent = `Video export failed: ${error.message}`;
         } finally {
