@@ -159,14 +159,14 @@ function fastGaussianPass(encoder, input, output, sigma, vanVliet, axis) {
         size: 192, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST});
     gpu_device.queue.writeBuffer(fastGaussianUniforms[axis], 0, data);
     const results = Array.from({length: count}, () => getCachedTexture(input.width, input.height, GPUTextureUsage.STORAGE_BINDING));
-    let pass = beginBlurPass(encoder, {}, true);
+    let pass = encoder.beginComputePass();
     pass.setPipeline(filter);
     pass.setBindGroup(0, gpu_device.createBindGroup({layout: filter.getBindGroupLayout(0), entries: [
         {binding: 0, resource: input.createView()}, {binding: 1, resource: {buffer: fastGaussianUniforms[axis]}},
         ...results.map((t, i) => ({binding: i + 2, resource: t.createView()})),
     ]}));
     pass.dispatchWorkgroups(Math.ceil(input.height / 64), count); pass.end();
-    pass = beginBlurPass(encoder, {}, true);
+    pass = encoder.beginComputePass();
     pass.setPipeline(sum);
     pass.setBindGroup(0, gpu_device.createBindGroup({layout: sum.getBindGroupLayout(0), entries: [
         ...results.map((t, i) => ({binding: i, resource: t.createView()})),

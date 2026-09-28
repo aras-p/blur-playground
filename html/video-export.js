@@ -12,15 +12,17 @@ async function exportBlurVideo({ canvas, renderFrame, onProgress }) {
     let config;
     // Baseline H.264 excludes B-frames, so decode order equals presentation order.
     // Try levels 4.2 (1080p60) and 5.2 (4K60), checking the actual dimensions.
-    for (const codec of ['avc1.42002a', 'avc1.420034']) {
-        const candidate = {
-            codec, width: capture.width, height: capture.height,
-            bitrate: 12_000_000, framerate: fps,
-            latencyMode: 'quality', avc: { format: 'avc' },
-        };
-        if ((await VideoEncoder.isConfigSupported(candidate)).supported) {
-            config = candidate;
-            break;
+    configurations: for (const hardwareAcceleration of ['prefer-hardware', 'no-preference']) {
+        for (const codec of ['avc1.42002a', 'avc1.420034']) {
+            const candidate = {
+                codec, width: capture.width, height: capture.height,
+                bitrate: 12_000_000, framerate: fps,
+                hardwareAcceleration, latencyMode: 'quality', avc: { format: 'avc' },
+            };
+            if ((await VideoEncoder.isConfigSupported(candidate)).supported) {
+                config = candidate;
+                break configurations;
+            }
         }
     }
     if (!config) {

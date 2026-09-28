@@ -96,12 +96,7 @@ body {
 #textureList option.final-output {
     font-weight: bold;
 }
-#blurTime {
-    margin-top: 10px;
-    color: #bbb;
-    font-variant-numeric: tabular-nums;
-}
-#renderVideo {
+#renderVideo, #timeNoopVideo {
     margin-top: 5px;
     padding: 6px 10px;
     background: #383838;
@@ -110,7 +105,7 @@ body {
     color: #e0e0e0;
     cursor: pointer;
 }
-#renderVideo:disabled { opacity: 0.5; cursor: default; }
+#renderVideo:disabled, #timeNoopVideo:disabled { opacity: 0.5; cursor: default; }
 #videoStatus { max-width: 290px; font-size: 12px; color: #bbb; }
 #videoStatus a { color: #acd1ff; }
 #status {
@@ -232,6 +227,7 @@ body {
             <label for="animateRadius">Animate</label>
         </div>
         <button type="button" id="renderVideo">Render Video</button>
+        <button type="button" id="timeNoopVideo">Time no-op video</button>
         <div id="videoStatus" role="status" aria-live="polite"></div>
     </div>
 
@@ -245,7 +241,6 @@ body {
         </select>
     </div>
 </div>
-<div id="blurTime">GPU blur: —</div>
 <div id="status">WebGPU initializing...</div>
 <div id="error"></div>
 
@@ -616,7 +611,6 @@ async function initWebGPU() {
         }
 
         const requiredFeatures = ['float32-filterable', 'float32-blendable'];
-        if (adapter.features.has('timestamp-query')) requiredFeatures.push('timestamp-query');
         gpu_device = await adapter.requestDevice({ requiredFeatures });
         gpu_ctx = canvas.getContext('webgpu');
         gpu_canvas_format = navigator.gpu.getPreferredCanvasFormat();
@@ -634,7 +628,7 @@ async function initWebGPU() {
         pip_separable = createPipeline(SEPARABLE_BLUR_SHADER);
         pip_dk_down = createPipeline(DK_DOWNSAMPLE_SHADER);
         pip_dk_up = createPipeline(DK_UPSAMPLE_SHADER);
-        skiaGaussian = new SkiaGaussian(gpu_device, FULLSCREEN_VERTEX_SHADER, beginBlurPass);
+        skiaGaussian = new SkiaGaussian(gpu_device, FULLSCREEN_VERTEX_SHADER);
         pip_reduced_gaussian = createPipeline(REDUCED_GAUSSIAN_SHADER);
         pip_reduced_down = createPipeline(REDUCED_DOWNSAMPLE_SHADER);
         pip_reduced_mix = createPipeline(REDUCED_MIX_SHADER);
@@ -902,7 +896,7 @@ function separablePass(commandEncoder, input, output, mode, horizontal, radius) 
         ],
     });
 
-    const renderPass = beginBlurPass(commandEncoder, {
+    const renderPass = commandEncoder.beginRenderPass({
         colorAttachments: [{
             view: output.createView(),
             loadOp: 'clear',
@@ -1013,7 +1007,7 @@ function kawaseDownsample(commandEncoder, input, fullSizeX, fullSizeY, divisorX,
         ],
     });
 
-    const renderPass = beginBlurPass(commandEncoder, {
+    const renderPass = commandEncoder.beginRenderPass({
         colorAttachments: [{
             view: output.createView(),
             loadOp: 'clear',
@@ -1052,7 +1046,7 @@ function kawaseUpsample(commandEncoder, input, fullSizeX, fullSizeY, divisorX, d
         ],
     });
 
-    const renderPass = beginBlurPass(commandEncoder, {
+    const renderPass = commandEncoder.beginRenderPass({
         colorAttachments: [{
             view: output.createView(),
             loadOp: 'clear',
@@ -1083,7 +1077,7 @@ function kawaseMix(commandEncoder, input, output, ratio) {
         ],
     });
 
-    const renderPass = beginBlurPass(commandEncoder, {
+    const renderPass = commandEncoder.beginRenderPass({
         colorAttachments: [{
             view: output.createView(),
             loadOp: 'load',  // Important: load existing content for blending
@@ -1221,7 +1215,7 @@ function reducedPass(encoder, pipeline, input, output, data, other = null) {
     ];
     if (pipeline !== pip_reduced_down) entries.push({ binding: 0, resource: gpu_sampler_linear });
     if (other) other.forEach((tex, i) => entries.push({ binding: 3 + i, resource: tex.createView() }));
-    const pass = beginBlurPass(encoder, {colorAttachments: [{
+    const pass = encoder.beginRenderPass({colorAttachments: [{
         view: output.createView(), loadOp: 'clear', storeOp: 'store',
         clearValue: { r: 0, g: 0, b: 0, a: 0 },
     }]});
@@ -1384,84 +1378,9 @@ function getDisplayTexture(blurredOutput) {
     return blurredOutput;
 }
 
-// Measure the actual blur render passes; display and texture copies are excluded.
-// Each in-flight render owns its readback resources; stale results never replace
-// a newer radius/mode's timing, and all resources are released after readback.
-let blurTimingGeneration = 0;
-const blurTimings = new WeakMap();
-
-function beginBlurTiming(encoder) {
-    if (!gpu_device.features.has('timestamp-query')) return null;
-    const querySet = gpu_device.createQuerySet({ type: 'timestamp', count: 256 });
-    const resolve = gpu_device.createBuffer({
-        size: 2048, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
-    });
-    const readback = gpu_device.createBuffer({
-        size: 2048, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-    });
-    const timing = { querySet, resolve, readback, count: 0 };
-    blurTimings.set(encoder, timing);
-    return timing;
-}
-
-function beginBlurPass(encoder, descriptor, compute = false) {
-    const timing = blurTimings.get(encoder);
-    if (timing) {
-        descriptor.timestampWrites = {
-            querySet: timing.querySet,
-            beginningOfPassWriteIndex: timing.count++,
-            endOfPassWriteIndex: timing.count++,
-        };
-    }
-    return compute ? encoder.beginComputePass(descriptor) : encoder.beginRenderPass(descriptor);
-}
-
-function endBlurTiming(encoder, timing) {
-    blurTimings.delete(encoder);
-    if (timing.count === 0) return;
-    encoder.resolveQuerySet(timing.querySet, 0, timing.count, timing.resolve, 0);
-    encoder.copyBufferToBuffer(timing.resolve, 0, timing.readback, 0, timing.count * 8);
-}
-
-function showBlurTiming(generation, milliseconds, approximate = false) {
-    if (generation !== blurTimingGeneration) return;
-    const label = document.getElementById('blurTime');
-    label.textContent = approximate
-        ? `Blur queue: ~${milliseconds.toFixed(1)}ms`
-        : `GPU blur: ${milliseconds.toFixed(1)}ms`;
-    label.title = approximate
-        ? 'GPU timestamps unavailable. Queue completion estimate; includes scheduling and earlier queued work, excludes the display pass.'
-        : 'Sum of GPU blur-pass timestamps. Excludes CPU encoding, texture copies, image upload, display, and readback. Browser timer precision may be reduced.';
-}
-
-async function readBlurTiming(timing, generation) {
-    try {
-        let nanoseconds = 0n;
-        if (timing.count > 0) {
-            await timing.readback.mapAsync(GPUMapMode.READ);
-            const timestamps = new BigUint64Array(timing.readback.getMappedRange());
-            for (let i = 0; i < timing.count; i += 2) {
-                nanoseconds += timestamps[i + 1] - timestamps[i];
-            }
-            timing.readback.unmap();
-        }
-        showBlurTiming(generation, Math.max(0, Number(nanoseconds) / 1e6));
-    } catch (error) {
-        if (generation === blurTimingGeneration) {
-            const label = document.getElementById('blurTime');
-            label.textContent = 'GPU blur: unavailable';
-            label.title = error.message;
-        }
-    } finally {
-        timing.querySet.destroy();
-        timing.resolve.destroy();
-        timing.readback.destroy();
-    }
-}
-
 // ================ Rendering
 
-async function render(captureFrame = null) {
+async function render(captureFrame = null, skipBlur = false) {
     if (!gpu_device || !tex_source) return;
 
     const { width, height } = cur_image_size;
@@ -1478,11 +1397,8 @@ async function render(captureFrame = null) {
     resetTextureCache();
     intermediateTextures = [];
 
-    let commandEncoder = gpu_device.createCommandEncoder();
-    const timingGeneration = ++blurTimingGeneration;
-    const hasBlur = blur_params.radius_x > 0 || blur_params.radius_y > 0;
-    const timing = hasBlur ? beginBlurTiming(commandEncoder) : null;
-    document.getElementById('blurTime').textContent = hasBlur ? 'GPU blur: measuring…' : 'GPU blur: 0.0ms';
+    const commandEncoder = gpu_device.createCommandEncoder();
+    const hasBlur = !skipBlur && (blur_params.radius_x > 0 || blur_params.radius_y > 0);
 
     // Determine which texture to display (before selection override)
     let blurredOutput = tex_source;
@@ -1522,25 +1438,6 @@ async function render(captureFrame = null) {
         }
     }
 
-    if (timing) {
-        endBlurTiming(commandEncoder, timing);
-    } else if (hasBlur) {
-        // Capture completion before submitting display work. This fallback is
-        // explicitly a queue estimate, not a GPU execution timestamp.
-        const started = performance.now();
-        gpu_device.queue.submit([commandEncoder.finish()]);
-        gpu_device.queue.onSubmittedWorkDone().then(() => {
-            showBlurTiming(timingGeneration, performance.now() - started, true);
-        }).catch(() => {
-            if (timingGeneration === blurTimingGeneration) {
-                document.getElementById('blurTime').textContent = 'Blur queue: unavailable';
-            }
-        });
-        commandEncoder = gpu_device.createCommandEncoder();
-    } else {
-        showBlurTiming(timingGeneration, 0);
-    }
-
     // Update the texture list UI
     updateTextureList();
 
@@ -1572,7 +1469,6 @@ async function render(captureFrame = null) {
     renderPass.end();
 
     gpu_device.queue.submit([commandEncoder.finish()]);
-    if (timing) void readBlurTiming(timing, timingGeneration);
     // Snapshot in the same task, before WebGPU presents/clears the canvas.
     if (captureFrame) return captureFrame();
 }
@@ -1704,7 +1600,10 @@ function setupEventHandlers() {
     const renderVideo = document.getElementById('renderVideo');
     const videoStatus = document.getElementById('videoStatus');
     let videoURL = null;
-    renderVideo.addEventListener('click', async () => {
+    renderVideo.addEventListener('click', () => renderVideoCycle(false));
+    document.getElementById('timeNoopVideo').addEventListener('click', () => renderVideoCycle(true));
+
+    async function renderVideoCycle(skipBlur) {
         if (renderingVideo) return;
         if (!gpu_device || !tex_source || loadingImages) {
             videoStatus.textContent = 'Load an image before rendering a video.';
@@ -1739,7 +1638,7 @@ function setupEventHandlers() {
                 canvas: document.getElementById('canvas'),
                 renderFrame: (elapsed, capture) => {
                     setAnimatedRadius(elapsed);
-                    return render(capture);
+                    return render(capture, skipBlur);
                 },
                 onProgress: (done, total) => {
                     videoStatus.textContent = `Rendering video: ${done}/${total} frames…`;
@@ -1748,12 +1647,12 @@ function setupEventHandlers() {
             videoURL = URL.createObjectURL(blob);
             const download = document.createElement('a');
             download.href = videoURL;
-            download.download = `blur-anim-${method}.mp4`;
+            download.download = `blur-anim-${skipBlur ? 'noop' : method}.mp4`;
             download.textContent = 'Download again';
             videoStatus.replaceChildren(download);
             download.click();
             const elapsed = ((performance.now() - started) / 1000).toFixed(2);
-            videoStatus.prepend(`Rendered and encoded in ${elapsed}s (6s video, 60 fps). `);
+            videoStatus.prepend(`${skipBlur ? 'No-op video' : 'Video'} rendered and encoded in ${elapsed}s (6s video, 60 fps). `);
         } catch (error) {
             videoStatus.textContent = `Video export failed: ${error.message}`;
         } finally {
@@ -1765,7 +1664,7 @@ function setupEventHandlers() {
             animateRadius.checked = resumeAnimation;
             if (resumeAnimation) animationFrame = requestAnimationFrame(animateBlurRadius);
         }
-    });
+    }
 
     radiusX.addEventListener('input', (e) => {
         const value = parseFloat(e.target.value);

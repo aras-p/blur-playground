@@ -5,9 +5,8 @@
  * Simplified to a whole image with clamped edges, no crop/transform/tile modes.
  */
 class SkiaGaussian {
-    constructor(device, vertexShader, beginPass) {
+    constructor(device, vertexShader) {
         this.device = device;
-        this.beginPass = beginPass;
         this.textures = [];
         this.buffers = [];
         this.sampler = device.createSampler({minFilter: 'linear', magFilter: 'linear'});
@@ -118,7 +117,7 @@ fn samplePixel(pos: vec2f) -> vec4f {
         const buffer = this.buffers[index] ??= this.device.createBuffer({size: 256,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST});
         this.device.queue.writeBuffer(buffer, 0, data);
-        const pass = this.beginPass(encoder, {colorAttachments: [{view: output.createView(),
+        const pass = encoder.beginRenderPass({colorAttachments: [{view: output.createView(),
             loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 0]}]});
         pass.setPipeline(pipeline);
         pass.setBindGroup(0, this.device.createBindGroup({layout: pipeline.getBindGroupLayout(0),
