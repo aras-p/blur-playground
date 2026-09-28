@@ -73,14 +73,26 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 }
 `;
 
-// Integrate each destination pixel's source footprint. Exact area weights
-// preserve isolated highlights even when odd dimensions change sampling phase.
+// Integrate each destination pixel's source footprint. Area weights preserve
+// isolated highlights even when odd dimensions change sampling phase. Pairing
+// weights into linear samples is exact apart from hardware filtering precision.
 const SMOL_DOWNSAMPLE_SHADER = FULLSCREEN_VERTEX_SHADER + `
 // xy is the logical size, zw is the one-texel padding on each axis.
 struct Params { source: vec4f, destination: vec4f, }
 @group(0) @binding(0) var smp: sampler;
 @group(0) @binding(1) var tex: texture_2d<f32>;
 @group(0) @binding(2) var<uniform> params: Params;
+// The area filter covers <=3 texels per axis. Pair its first two positive
+// weights into one linear lookup; the remaining texel is the second group.
+// Return two normalized coordinates and the second group's normalized weight.
+fn areaAxis(lo: f32, hi: f32, physicalSize: f32) -> vec3f {
+    let first = floor(lo);
+    let w0 = min(hi, first + 1.0) - lo;
+    let w1 = max(0.0, min(hi, first + 2.0) - (first + 1.0));
+    let w2 = max(0.0, hi - (first + 2.0));
+    return vec3f((first + 0.5 + w1 / (w0 + w1)) / physicalSize,
+                 (first + 2.5) / physicalSize, w2 / (hi - lo));
+}
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let physicalSize = vec2f(textureDimensions(tex));
@@ -106,17 +118,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     if (all((size == outputSize) | (size == 2.0 * outputSize))) {
         return textureSampleLevel(tex, smp, (lo + hi) * 0.5 / physicalSize, 0.0);
     }
-    var col = vec4f(0.0);
-    // Each axis spans at most three source texels (one on a border).
-    for (var y = i32(floor(lo.y)); y < i32(ceil(hi.y)); y++) {
-        for (var x = i32(floor(lo.x)); x < i32(ceil(hi.x)); x++) {
-            let overlap = max(vec2f(0.0), min(hi, vec2f(f32(x + 1), f32(y + 1)))
-                - max(lo, vec2f(f32(x), f32(y))));
-            col += textureLoad(tex, vec2i(x, y), 0) * overlap.x * overlap.y;
-        }
+    let x = areaAxis(lo.x, hi.x, physicalSize.x);
+    let y = areaAxis(lo.y, hi.y, physicalSize.y);
+    // These decisions are uniform over the draw. Exact/unchanged axes need
+    // only the first group, including their preserved border pixels.
+    let secondX = size.x != outputSize.x && size.x != 2.0 * outputSize.x;
+    let secondY = size.y != outputSize.y && size.y != 2.0 * outputSize.y;
+    var a = textureSampleLevel(tex, smp, vec2f(x.x, y.x), 0.0);
+    if (secondX) {
+        a = mix(a, textureSampleLevel(tex, smp, vec2f(x.y, y.x), 0.0), x.z);
     }
-    let area = hi - lo;
-    return col / (area.x * area.y);
+    if (secondY) {
+        var b = textureSampleLevel(tex, smp, vec2f(x.x, y.y), 0.0);
+        if (secondX) {
+            b = mix(b, textureSampleLevel(tex, smp, vec2f(x.y, y.y), 0.0), x.z);
+        }
+        a = mix(a, b, y.z);
+    }
+    return a;
 }
 `;
 
