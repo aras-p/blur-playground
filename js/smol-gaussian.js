@@ -1,4 +1,4 @@
-/* Redux Gaussian: a Gaussian approximation using downsampling, small separable
+/* Smol Gaussian: a Gaussian approximation using downsampling, small separable
  * filters, and reconstruction, with smooth transitions between working resolutions.
  * Each axis chooses its working resolution independently.
  * Reduction and reconstruction already add blur, so each endpoint subtracts
@@ -35,24 +35,24 @@
  */
 
 /** @type {GPURenderPipeline} */
-let pip_redux_gaussian = null;
-let pip_redux_down = null;
-let pip_redux_mix = null;
-let pip_redux_mix_bilinear = null;
-const reduxUniformBuffers = [];
-let reduxUniformBufferIndex = 0;
+let pip_smol_gaussian = null;
+let pip_smol_down = null;
+let pip_smol_mix = null;
+let pip_smol_mix_bilinear = null;
+const smolUniformBuffers = [];
+let smolUniformBufferIndex = 0;
 
-function initReduxGaussian() {
-    pip_redux_gaussian = createPipeline(REDUX_GAUSSIAN_SHADER);
-    pip_redux_down = createPipeline(REDUX_DOWNSAMPLE_SHADER);
+function initSmolGaussian() {
+    pip_smol_gaussian = createPipeline(SMOL_GAUSSIAN_SHADER);
+    pip_smol_down = createPipeline(SMOL_DOWNSAMPLE_SHADER);
     // Two specializations of one reconstruction shader, not two blur algorithms.
     // The general variant can still use bilinear on either axis independently.
-    pip_redux_mix = createPipeline(REDUX_MIX_SHADER);
-    pip_redux_mix_bilinear = createPipeline(REDUX_MIX_SHADER, undefined, false,
+    pip_smol_mix = createPipeline(SMOL_MIX_SHADER);
+    pip_smol_mix_bilinear = createPipeline(SMOL_MIX_SHADER, undefined, false,
         { ALL_BILINEAR: true });
 }
 
-const REDUX_GAUSSIAN_SHADER = FULLSCREEN_VERTEX_SHADER + `
+const SMOL_GAUSSIAN_SHADER = FULLSCREEN_VERTEX_SHADER + `
 struct Params {
     stepCenterCount: vec4f,
     taps: array<vec4f, 12>,
@@ -75,7 +75,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 
 // Integrate each destination pixel's source footprint. Exact area weights
 // preserve isolated highlights even when odd dimensions change sampling phase.
-const REDUX_DOWNSAMPLE_SHADER = FULLSCREEN_VERTEX_SHADER + `
+const SMOL_DOWNSAMPLE_SHADER = FULLSCREEN_VERTEX_SHADER + `
 // xy is the logical size, zw is the one-texel padding on each axis.
 struct Params { source: vec4f, destination: vec4f, }
 @group(0) @binding(0) var smp: sampler;
@@ -121,7 +121,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 `;
 
 // Reconstruct and blend all RGBA channels, without using alpha as a weight.
-const REDUX_MIX_SHADER = FULLSCREEN_VERTEX_SHADER + `
+const SMOL_MIX_SHADER = FULLSCREEN_VERTEX_SHADER + `
 override ALL_BILINEAR: bool = false;
 struct Params {
     ratio: vec2f, outputSize: vec2f,
@@ -190,16 +190,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 }
 `;
 
-// ================ Redux Gaussian blur
+// ================ Smol Gaussian blur
 
-function reduxPass(encoder, pipeline, input, output, data, other = null) {
-    const index = reduxUniformBufferIndex++;
-    if (!reduxUniformBuffers[index]) {
-        reduxUniformBuffers[index] = gpu_device.createBuffer({
+function smolPass(encoder, pipeline, input, output, data, other = null) {
+    const index = smolUniformBufferIndex++;
+    if (!smolUniformBuffers[index]) {
+        smolUniformBuffers[index] = gpu_device.createBuffer({
             size: 208, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
     }
-    const buffer = reduxUniformBuffers[index];
+    const buffer = smolUniformBuffers[index];
     gpu_device.queue.writeBuffer(buffer, 0, data);
     const entries = [
         { binding: 1, resource: input.createView() },
@@ -219,7 +219,7 @@ function reduxPass(encoder, pipeline, input, output, data, other = null) {
     pass.end();
 }
 
-function reduxAxisPlan(radius, size) {
+function smolAxisPlan(radius, size) {
     const sigma = Math.max(0, radius) / 3;
     let level = 0;
     // Ceil-sized levels support odd dimensions and stop at a single texel.
@@ -233,7 +233,7 @@ function reduxAxisPlan(radius, size) {
     return { sigma, level, blend: level < maxLevel ? t * t * (3 - 2 * t) : 0 };
 }
 
-function reduxGaussianAxis(encoder, input, sigma, horizontal, destination = null) {
+function smolGaussianAxis(encoder, input, sigma, horizontal, destination = null) {
     if (sigma < 0.01 || (horizontal ? input.width : input.height) === 1) return input;
     const data = new Float32Array(52);
     data[0] = horizontal ? 1 / input.width : 0;
@@ -264,7 +264,7 @@ function reduxGaussianAxis(encoder, input, sigma, horizontal, destination = null
     data[3] = count;
     for (let j = 0; j < count; j++) data[5 + j * 4] /= sum;
     const output = destination ?? getCachedTexture(input.width, input.height);
-    reduxPass(encoder, pip_redux_gaussian, input, output, data);
+    smolPass(encoder, pip_smol_gaussian, input, output, data);
     return output;
 }
 
@@ -276,12 +276,12 @@ function reconstructionVariance(scale) {
     return scale * scale * (scale > 2 ? 1 / 3 : scale === 2 ? 3 / 16 : 1 / 6);
 }
 
-function blurReduxGaussian(encoder, input, output) {
-    const x = reduxAxisPlan(blur_params.radius_x, input.width);
-    const y = reduxAxisPlan(blur_params.radius_y, input.height);
+function blurSmolGaussian(encoder, input, output) {
+    const x = smolAxisPlan(blur_params.radius_x, input.width);
+    const y = smolAxisPlan(blur_params.radius_y, input.height);
     // Keep the selected levels, but skip neighboring endpoints and switch
     // levels abruptly at the existing reduction thresholds.
-    if (blur_params.disable_redux_blending) x.blend = y.blend = 0;
+    if (blur_params.disable_smol_blending) x.blend = y.blend = 0;
     const levels = new Map();
     levels.set('0,0', { texture: input, width: input.width, height: input.height,
         padX: 0, padY: 0, vx: 0, vy: 0 });
@@ -303,7 +303,7 @@ function blurReduxGaussian(encoder, input, output) {
         const padX = lx > 0 ? 1 : 0;
         const padY = ly > 0 ? 1 : 0;
         const texture = getCachedTexture(width + 2 * padX, height + 2 * padY);
-        reduxPass(encoder, pip_redux_down, src, texture,
+        smolPass(encoder, pip_smol_down, src, texture,
             new Float32Array([prev.width, prev.height, prev.padX, prev.padY,
                 width, height, padX, padY]));
         // Box reduction variance in original texels; approximate for odd sizes.
@@ -328,9 +328,9 @@ function blurReduxGaussian(encoder, input, output) {
         const sigmaX = Math.sqrt(Math.max(0, x.sigma ** 2 - entry.vx - reconstructionVariance(sx))) / sx;
         const sigmaY = Math.sqrt(Math.max(0, y.sigma ** 2 - entry.vy - reconstructionVariance(sy))) / sy;
         const filterY = sigmaY >= 0.01 && entry.texture.height > 1;
-        let tex = reduxGaussianAxis(encoder, entry.texture, sigmaX, true,
+        let tex = smolGaussianAxis(encoder, entry.texture, sigmaX, true,
             filterY ? null : destination);
-        tex = reduxGaussianAxis(encoder, tex, sigmaY, false, destination);
+        tex = smolGaussianAxis(encoder, tex, sigmaY, false, destination);
         intermediateTextures.push({ texture: tex, name: `Gaussian ${tex.width}×${tex.height}` });
         return { ...entry, texture: tex };
     }
@@ -363,7 +363,7 @@ function blurReduxGaussian(encoder, input, output) {
     const allBilinear = [a, b, c].every(tex =>
         2 * tex.width >= output.width && 2 * tex.height >= output.height);
     const bounds = entry => [entry.width, entry.height, entry.padX, entry.padY];
-    reduxPass(encoder, allBilinear ? pip_redux_mix_bilinear : pip_redux_mix, a.texture, output,
+    smolPass(encoder, allBilinear ? pip_smol_mix_bilinear : pip_smol_mix, a.texture, output,
         new Float32Array([middleWeight, diagonalWeight, output.width, output.height,
             ...bounds(a), ...bounds(b), ...bounds(c)]), [b.texture, c.texture]);
 }

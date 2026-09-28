@@ -204,13 +204,13 @@ body {
             <label><input type="radio" name="blurMode" value="tent"> Tent</label>
             <label><input type="radio" name="blurMode" value="gaussian"> Gaussian</label>
             <label><input type="radio" name="blurMode" value="fast_gaussian"> Fast Gaussian</label>
-            <label><input type="radio" name="blurMode" value="redux_gaussian" checked> Redux Gaussian</label>
+            <label><input type="radio" name="blurMode" value="smol_gaussian" checked> Smol Gaussian</label>
             <label><input type="radio" name="blurMode" value="skia_gaussian"> Skia Gaussian</label>
             <label><input type="radio" name="blurMode" value="dual_kawase"> Dual Kawase</label>
         </div>
         <div class="checkbox-row">
-            <input type="checkbox" id="disableReduxBlending">
-            <label for="disableReduxBlending">Disable blending between levels</label>
+            <input type="checkbox" id="disableSmolBlending">
+            <label for="disableSmolBlending">Disable blending between levels</label>
         </div>
     </div>
 
@@ -256,7 +256,7 @@ body {
 <script src="js/exrloader.js"></script>
 <script src="js/gpu-helpers.js"></script>
 <script src="js/separable-blur.js"></script>
-<script src="js/redux-gaussian.js"></script>
+<script src="js/smol-gaussian.js"></script>
 <script src="js/dual-kawase.js"></script>
 <script src="js/fast-gaussian.js"></script>
 <script src="js/skia-gaussian.js"></script>
@@ -334,14 +334,14 @@ const BlurMode = {
     TENT: 'tent',
     GAUSSIAN: 'gaussian',
     FAST_GAUSSIAN: 'fast_gaussian',
-    REDUX_GAUSSIAN: 'redux_gaussian',
+    SMOL_GAUSSIAN: 'smol_gaussian',
     SKIA_GAUSSIAN: 'skia_gaussian',
     DUAL_KAWASE: 'dual_kawase',
 };
 
 const blur_params = {
-    mode: BlurMode.REDUX_GAUSSIAN,
-    disable_redux_blending: false,
+    mode: BlurMode.SMOL_GAUSSIAN,
+    disable_smol_blending: false,
     radius_x: 96,
     radius_y: 96,
     lock_radius: false,
@@ -384,7 +384,7 @@ async function initWebGPU() {
         initSeparableBlur();
         initDualKawase();
         skiaGaussian = new SkiaGaussian(gpu_device, FULLSCREEN_VERTEX_SHADER);
-        initReduxGaussian();
+        initSmolGaussian();
 
         statusEl.textContent = 'WebGPU ready. Load an image to begin.';
         return true;
@@ -642,7 +642,7 @@ async function render(captureFrame = null, skipBlur = false) {
 
     // Reset resource pools for this frame
     resetKawaseUniformBufferPool();
-    reduxUniformBufferIndex = 0;
+    smolUniformBufferIndex = 0;
     resetTextureCache();
     intermediateTextures = [];
 
@@ -663,8 +663,8 @@ async function render(captureFrame = null, skipBlur = false) {
             skiaGaussian.blur(commandEncoder, tex_source, tex_blurred,
                 blur_params.radius_x, blur_params.radius_y, intermediateTextures);
             blurredOutput = tex_blurred;
-        } else if (blur_params.mode === BlurMode.REDUX_GAUSSIAN) {
-            blurReduxGaussian(commandEncoder, tex_source, tex_blurred);
+        } else if (blur_params.mode === BlurMode.SMOL_GAUSSIAN) {
+            blurSmolGaussian(commandEncoder, tex_source, tex_blurred);
             blurredOutput = tex_blurred;
         } else {
             const tex_blur_tmp = blur_params.radius_x > 0 && blur_params.radius_y > 0
@@ -783,17 +783,17 @@ function setupEventHandlers() {
     });
 
     // Blur mode radio buttons
-    const disableReduxBlending = document.getElementById('disableReduxBlending');
-    disableReduxBlending.disabled = blur_params.mode !== BlurMode.REDUX_GAUSSIAN;
-    disableReduxBlending.addEventListener('change', (e) => {
-        blur_params.disable_redux_blending = e.target.checked;
+    const disableSmolBlending = document.getElementById('disableSmolBlending');
+    disableSmolBlending.disabled = blur_params.mode !== BlurMode.SMOL_GAUSSIAN;
+    disableSmolBlending.addEventListener('change', (e) => {
+        blur_params.disable_smol_blending = e.target.checked;
         resetTextureSelection();
         onBlurParamsChanged();
     });
     document.querySelectorAll('input[name="blurMode"]').forEach(radio => {
         radio.addEventListener('change', (e) => {
             blur_params.mode = e.target.value;
-            disableReduxBlending.disabled = blur_params.mode !== BlurMode.REDUX_GAUSSIAN;
+            disableSmolBlending.disabled = blur_params.mode !== BlurMode.SMOL_GAUSSIAN;
             // Reset texture selection to final output when blur mode changes
             resetTextureSelection();
             onBlurParamsChanged();

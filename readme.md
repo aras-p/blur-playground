@@ -14,7 +14,7 @@ and go to `http://localhost:8000/index.html`.
 Blur shaders, pipelines, and algorithm helpers live in `js/`:
 
 - `separable-blur.js`: Box, Tent, and Gaussian; Fast Gaussian also uses this for small radii.
-- `redux-gaussian.js`: Redux Gaussian.
+- `smol-gaussian.js`: Smol Gaussian.
 - `dual-kawase.js`: Dual Kawase.
 - `fast-gaussian.js` and `skia-gaussian.js`: Fast and Skia Gaussian.
 - `gpu-helpers.js`: shared fullscreen vertex shader, GPU resource helpers, and texture cache.
@@ -34,7 +34,7 @@ Fast Gaussian compute pipelines are created on first use.
 - **Fast Gaussian** - Blender compositor's recursive Gaussian blur: direct convolution
   for small radii, Deriche for medium radii, and parallel second-order Van Vliet
   sections for large radii. See details below.
-- **Redux Gaussian** - a Gaussian approximation using downsampling, small separable
+- **Smol Gaussian** - a Gaussian approximation using downsampling, small separable
   filters, and reconstruction, with smooth transitions between working resolutions.
 - **Skia Gaussian** - Skia’s GPU image-filter approach: progressive bilinear
   downsampling, a small Gaussian, and bilinear reconstruction. Supports independent
@@ -70,7 +70,7 @@ Deriche/Van Vliet switch; browser/GPU compiler choices also affect rounding.
 The filter retains Blender's approximations, including possible small negative
 lobes and changes at algorithm thresholds.
 
-### Redux Gaussian
+### Smol Gaussian
 
 Radius maps approximately to three Gaussian standard deviations, like the existing
 Gaussian mode. Each axis reduces independently to keep the working sigma small;
@@ -132,7 +132,7 @@ shape variation. Radius sliders use steps of 1.
 Area reduction, separable Gaussian filtering, and reconstruction are the building
 blocks. The variance estimates, transition thresholds, tapered tails, and choice
 of three endpoints define this particular approximation. Unlike Dual Kawase's
-blend between fixed blur widths, Redux Gaussian's endpoints all target the
+blend between fixed blur widths, Smol Gaussian's endpoints all target the
 same requested width; their blend hides a change of working resolution.
 
 Related work for the building blocks:
@@ -155,7 +155,7 @@ Related work for the building blocks:
   filtering across multiple resolutions. Its mixed-resolution pipeline is distinct
   from crossfading alternative grids for the same target blur here.
 
-These sources explain individual techniques, not the exact Redux Gaussian
+These sources explain individual techniques, not the exact Smol Gaussian
 combination implemented in this playground.
 
 ### Skia Gaussian
@@ -233,7 +233,7 @@ all on Chrome browser:
 |No blur          |  1.41 |  0.98 |   2.71 |
 |Gaussian         | 19.52 | 15.47 | 151.07 |
 |Fast Gaussian    |  2.25 |  1.86 |  10.09 |
-|Redux Gaussian   |  1.55 |  1.11 |   3.63 |
+|**Smol Gaussian**|  1.55 |  1.11 |   3.63 |
 |Skia             |  1.47 |  1.15 |   3.58 |
 |Dual Kawase      |  1.72 |  1.23 |   4.89 |
 
