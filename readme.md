@@ -14,7 +14,7 @@ and go to `http://localhost:8000/index.html`.
 Blur shaders, pipelines, and algorithm helpers live in `js/`:
 
 - `separable-blur.js`: Box, Tent, and Gaussian; Fast Gaussian also uses this for small radii.
-- `reduced-gaussian.js`: Reduced Gaussian.
+- `redux-gaussian.js`: Redux Gaussian.
 - `dual-kawase.js`: Dual Kawase.
 - `fast-gaussian.js` and `skia-gaussian.js`: Fast and Skia Gaussian.
 - `gpu-helpers.js`: shared fullscreen vertex shader, GPU resource helpers, and texture cache.
@@ -34,9 +34,8 @@ Fast Gaussian compute pipelines are created on first use.
 - **Fast Gaussian** - Blender compositor's recursive Gaussian blur: direct convolution
   for small radii, Deriche for medium radii, and parallel second-order Van Vliet
   sections for large radii. See details below.
-- **Reduced Gaussian** - independent X/Y area downsampling, followed by small
-  separable Gaussian filters and bilinear or cubic B-spline reconstruction. Uses just the radius
-  controls; working resolution and filter widths are chosen internally.
+- **Redux Gaussian** - a Gaussian approximation using downsampling, small separable
+  filters, and reconstruction, with smooth transitions between working resolutions.
 - **Skia Gaussian** - Skia’s GPU image-filter approach: progressive bilinear
   downsampling, a small Gaussian, and bilinear reconstruction. Supports independent
   X/Y radii; see implementation details below.
@@ -71,7 +70,7 @@ Deriche/Van Vliet switch; browser/GPU compiler choices also affect rounding.
 The filter retains Blender's approximations, including possible small negative
 lobes and changes at algorithm thresholds.
 
-### Reduced Gaussian
+### Redux Gaussian
 
 Radius maps approximately to three Gaussian standard deviations, like the existing
 Gaussian mode. Each axis reduces independently to keep the working sigma small;
@@ -133,7 +132,7 @@ shape variation. Radius sliders use steps of 1.
 Area reduction, separable Gaussian filtering, and reconstruction are the building
 blocks. The variance estimates, transition thresholds, tapered tails, and choice
 of three endpoints define this particular approximation. Unlike Dual Kawase's
-blend between fixed blur widths, Reduced Gaussian's endpoints all target the
+blend between fixed blur widths, Redux Gaussian's endpoints all target the
 same requested width; their blend hides a change of working resolution.
 
 Related work for the building blocks:
@@ -156,7 +155,7 @@ Related work for the building blocks:
   filtering across multiple resolutions. Its mixed-resolution pipeline is distinct
   from crossfading alternative grids for the same target blur here.
 
-These sources explain individual techniques, not the exact Reduced Gaussian
+These sources explain individual techniques, not the exact Redux Gaussian
 combination implemented in this playground.
 
 ### Skia Gaussian
@@ -238,7 +237,7 @@ blur bypassed; it still renders and encodes the source image.
 |No blur          |  1.89 |  2.12 |   3.60 |
 |Gaussian         | 19.98 | 16.37 | 151.31 |
 |Fast Gaussian    |  2.80 |  2.83 |  10.89 |
-|Reduced Gaussian |  2.11 |  2.23 |   4.63 |
+|Redux Gaussian |  2.11 |  2.23 |   4.63 |
 |Skia             |  2.03 |  2.32 |   4.59 |
 |Dual Kawase      |  2.26 |  2.41 |   6.01 |
 
