@@ -58,20 +58,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 `;
 
 const DK_MIX_SHADER = FULLSCREEN_VERTEX_SHADER + `
-struct Params {
-    ratio: f32,
-}
 @group(0) @binding(0) var smp: sampler;
 @group(0) @binding(1) var tex: texture_2d<f32>;
-@group(0) @binding(2) var<uniform> params: Params;
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    let col = textureSample(tex, smp, in.uv);
-    return vec4f(col.rgb, params.ratio);
+    return textureSample(tex, smp, in.uv);
 }
 `;
-
-// Fixed-size, bilinear-paired Gaussian: at most 25 texture reads per axis.
 
 // ================ Dual Kawase blur
 
@@ -79,7 +72,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 function getKawaseUniformBuffer() {
     if (kawaseUniformBufferIndex >= kawaseUniformBuffers.length) {
         kawaseUniformBuffers.push(gpu_device.createBuffer({
-            size: 8,  // uvStep (vec2f); also holds the mix ratio (f32)
+            size: 8,  // uvStep (vec2f)
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         }));
     }
@@ -170,16 +163,11 @@ function kawaseUpsample(commandEncoder, input, fullSizeX, fullSizeY, divisorX, d
 }
 
 function kawaseMix(commandEncoder, input, output, ratio) {
-    const paramsData = new Float32Array([ratio]);
-    const paramsBuffer = getKawaseUniformBuffer();
-    gpu_device.queue.writeBuffer(paramsBuffer, 0, paramsData);
-
     const bindGroup = gpu_device.createBindGroup({
         layout: pip_dk_mix.getBindGroupLayout(0),
         entries: [
             { binding: 0, resource: gpu_sampler_point },
             { binding: 1, resource: input.createView() },
-            { binding: 2, resource: { buffer: paramsBuffer } },
         ],
     });
 
@@ -191,6 +179,8 @@ function kawaseMix(commandEncoder, input, output, ratio) {
         }],
     });
 
+    // Use a constant weight so interpolation preserves all four channels.
+    renderPass.setBlendConstant([ratio, ratio, ratio, ratio]);
     renderPass.setPipeline(pip_dk_mix);
     renderPass.setBindGroup(0, bindGroup);
     renderPass.draw(3);

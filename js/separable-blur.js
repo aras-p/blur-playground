@@ -75,43 +75,42 @@ function calcSeparableWeights(mode, radius) {
         weights[i] /= sum;
     }
 
-    // Create 1D texture for kernel weights
-    const kernelTexture = gpu_device.createTexture({
-        size: [size],
-        format: 'r32float',
-        dimension: '1d',
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-    });
-
-    gpu_device.queue.writeTexture(
-        { texture: kernelTexture },
-        weights,
-        { bytesPerRow: size * 4 },
-        { width: size }
-    );
-
-    return { texture: kernelTexture, width: size };
+    return weights;
 }
 
+// Each frame uses at most one pass per axis. Keep separate resources so both
+// passes can be encoded before submission without overwriting each other's data.
+const separableResources = [];
+
 function separablePass(commandEncoder, input, output, mode, horizontal, radius) {
-    const width = cur_image_size.width;
-    const height = cur_image_size.height;
+    const axis = horizontal ? 0 : 1;
+    const resources = separableResources[axis] ??= {
+        buffer: gpu_device.createBuffer({
+            size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        }),
+    };
+    const size = Math.ceil(radius) + 1;
+    if (!resources.texture || resources.texture.width < size) {
+        resources.texture?.destroy();
+        resources.texture = gpu_device.createTexture({
+            size: [2 ** Math.ceil(Math.log2(size))],
+            format: 'r32float', dimension: '1d',
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+        });
+    }
+    if (resources.mode !== mode || resources.radius !== radius) {
+        gpu_device.queue.writeTexture({ texture: resources.texture },
+            calcSeparableWeights(mode, radius), {}, { width: size });
+        resources.mode = mode;
+        resources.radius = radius;
+    }
 
-    // Calculate kernel weights
-    const kernel = calcSeparableWeights(mode, radius);
-
-    // Create uniform buffer for blur params
-    const paramsData = new ArrayBuffer(16); // vec2f (8) + i32 (4) + padding (4)
+    const paramsData = new ArrayBuffer(16);
     const paramsView = new DataView(paramsData);
-    paramsView.setFloat32(0, horizontal ? 1.0 / width : 0.0, true);
-    paramsView.setFloat32(4, horizontal ? 0.0 : 1.0 / height, true);
-    paramsView.setInt32(8, kernel.width, true);
-
-    const paramsBuffer = gpu_device.createBuffer({
-        size: 16,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-    gpu_device.queue.writeBuffer(paramsBuffer, 0, paramsData);
+    paramsView.setFloat32(0, horizontal ? 1 / input.width : 0, true);
+    paramsView.setFloat32(4, horizontal ? 0 : 1 / input.height, true);
+    paramsView.setInt32(8, size, true);
+    gpu_device.queue.writeBuffer(resources.buffer, 0, paramsData);
 
     // Create bind group for this pass
     const blurBindGroup = gpu_device.createBindGroup({
@@ -119,8 +118,8 @@ function separablePass(commandEncoder, input, output, mode, horizontal, radius) 
         entries: [
             { binding: 0, resource: gpu_sampler_linear },
             { binding: 1, resource: input.createView() },
-            { binding: 2, resource: kernel.texture.createView() },
-            { binding: 3, resource: { buffer: paramsBuffer } },
+            { binding: 2, resource: resources.texture.createView() },
+            { binding: 3, resource: { buffer: resources.buffer } },
         ],
     });
 
@@ -137,7 +136,5 @@ function separablePass(commandEncoder, input, output, mode, horizontal, radius) 
     renderPass.setBindGroup(0, blurBindGroup);
     renderPass.draw(3);
     renderPass.end();
-
-    // Resources (kernel texture, params buffer) will be garbage collected after GPU is done
 }
 

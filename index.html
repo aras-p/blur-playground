@@ -221,7 +221,7 @@ body {
             <input type="range" id="radiusX" min="0" max="1000" step="1" value="96">
             <span class="value" id="radiusXValue">96</span>
         </div>
-        <div class="slider-row disabled" id="radiusYRow">
+        <div class="slider-row" id="radiusYRow">
             <label for="radiusY">Y:</label>
             <input type="range" id="radiusY" min="0" max="1000" step="1" value="96">
             <span class="value" id="radiusYValue">96</span>
@@ -291,14 +291,10 @@ let gpu_canvas_format = null;
 let gpu_sampler_linear = null;
 /** @type {GPUSampler} */
 let gpu_sampler_point = null;
-/** @type {GPUBindGroup} */
-let gpu_bind_group = null;
 /** @type {GPUTexture} */
 let tex_source = null;
 /** @type {GPUTexture} */
 let tex_blurred = null;
-/** @type {GPUTexture} */
-let tex_blur_tmp = null;
 /** @type {GPURenderPipeline} */
 let pip_display = null;
 /** @type {SkiaGaussian} */
@@ -318,8 +314,9 @@ function fitCanvasToViewport(imageWidth, imageHeight) {
 
     // Available space (viewport minus controls and margins)
     const controlsHeight = document.querySelector('.controls').offsetHeight;
-    const maxWidth = window.innerWidth - margin * 2;
-    const maxHeight = window.innerHeight - controlsHeight - margin * 3;
+    const sidebarWidth = document.querySelector('.texture-list-container').offsetWidth;
+    const maxWidth = Math.max(1, window.innerWidth - sidebarWidth - margin * 2 - 10);
+    const maxHeight = Math.max(1, window.innerHeight - controlsHeight - margin * 3);
 
     // Calculate scale to fit
     const scaleX = maxWidth / imageWidth;
@@ -409,9 +406,6 @@ function srgbToLinear(value) {
 }
 
 async function loadImage(file) {
-    const errorEl = document.getElementById('error');
-    errorEl.textContent = '';
-
     return new Promise((resolve, reject) => {
         const img = new Image();
         img.onload = () => {
@@ -425,6 +419,9 @@ async function loadImage(file) {
         img.src = URL.createObjectURL(file);
     });
 }
+
+// Byte inputs have only 256 possible values; avoid three powers per pixel.
+const srgbToLinearTable = Float32Array.from({ length: 256 }, (_, i) => srgbToLinear(i));
 
 function imageToLinearFloat(img) {
     // Draw image to temp canvas to get pixel data
@@ -440,11 +437,10 @@ function imageToLinearFloat(img) {
     // Convert to linear float RGBA
     const floatData = new Float32Array(img.width * img.height * 4);
     for (let i = 0; i < pixels.length; i += 4) {
-        const idx = i;
-        floatData[idx] = srgbToLinear(pixels[i]);
-        floatData[idx + 1] = srgbToLinear(pixels[i + 1]);
-        floatData[idx + 2] = srgbToLinear(pixels[i + 2]);
-        floatData[idx + 3] = pixels[i + 3] / 255.0;
+        floatData[i] = srgbToLinearTable[pixels[i]];
+        floatData[i + 1] = srgbToLinearTable[pixels[i + 1]];
+        floatData[i + 2] = srgbToLinearTable[pixels[i + 2]];
+        floatData[i + 3] = pixels[i + 3] / 255.0;
     }
 
     return { data: floatData, width: img.width, height: img.height };
@@ -452,6 +448,12 @@ function imageToLinearFloat(img) {
 
 function createTextureFromLinearData(linearData) {
     const { data, width, height } = linearData;
+
+    // Validate before replacing the current image.
+    const limit = gpu_device.limits.maxTextureDimension2D;
+    if (width < 1 || height < 1 || width > limit || height > limit) {
+        throw new Error(`Image dimensions ${width}×${height} exceed the supported range of 1–${limit}.`);
+    }
 
     // Destroy old texture if exists
     if (tex_source) {
@@ -470,15 +472,6 @@ function createTextureFromLinearData(linearData) {
         { width, height }
     );
 
-    // Create bind group
-    gpu_bind_group = gpu_device.createBindGroup({
-        layout: pip_display.getBindGroupLayout(0),
-        entries: [
-            { binding: 0, resource: gpu_sampler_linear },
-            { binding: 1, resource: tex_source.createView() },
-        ],
-    });
-
     return { width, height };
 }
 
@@ -486,7 +479,7 @@ async function loadEXR(file) {
     const arrayBuffer = await file.arrayBuffer();
     const result = window.parseEXR(arrayBuffer);
 
-    // EXR files are stored bottom-to-top, flip vertically
+    // The adapted loader returns bottom-to-top rows; flip for the canvas.
     const { width, height, data } = result;
     const flipped = new Float32Array(data.length);
     const rowSize = width * 4; // RGBA
@@ -500,17 +493,29 @@ async function loadEXR(file) {
 }
 
 let renderingVideo = false;
-let loadingImages = 0;
+let loadingImage = false;
+let imageLoadId = 0;
 
 async function handleImageFile(file) {
-    if (renderingVideo) return;
-    loadingImages++;
+    if (renderingVideo || !gpu_device) return;
+    const loadId = ++imageLoadId;
+    loadingImage = true;
     const statusEl = document.getElementById('status');
     const errorEl = document.getElementById('error');
     const canvas = document.getElementById('canvas');
 
     try {
         statusEl.textContent = 'Loading image...';
+        errorEl.textContent = '';
+        // Sample fetches and local files share one ordering and loading state.
+        if (typeof file === 'string') {
+            const src = file;
+            const response = await fetch(src);
+            if (!response.ok) throw new Error(`Failed to fetch ${src}`);
+            const blob = await response.blob();
+            if (loadId !== imageLoadId) return;
+            file = new File([blob], src.split('/').pop(), { type: blob.type });
+        }
 
         let linearData;
         const isEXR = file.name.toLowerCase().endsWith('.exr');
@@ -518,9 +523,10 @@ async function handleImageFile(file) {
         if (isEXR) {
             statusEl.textContent = 'Parsing EXR file...';
             linearData = await loadEXR(file);
-            statusEl.textContent = `Loaded EXR (${linearData.width}x${linearData.height})`;
+            if (loadId !== imageLoadId) return;
         } else {
             const img = await loadImage(file);
+            if (loadId !== imageLoadId) return;
             statusEl.textContent = `Converting to linear (${img.width}x${img.height})...`;
             linearData = imageToLinearFloat(img);
         }
@@ -544,23 +550,21 @@ async function handleImageFile(file) {
 
         // Reset texture selection and render
         resetTextureSelection();
-        render();
+        await render();
 
+        if (loadId !== imageLoadId) return;
         statusEl.textContent = `Loaded: ${file.name} (${width}x${height})`;
     } catch (e) {
+        if (loadId !== imageLoadId) return;
         errorEl.textContent = `Error: ${e.message}`;
         statusEl.textContent = 'Failed to load image.';
         console.error('Image load error:', e);
     } finally {
-        loadingImages--;
+        if (loadId === imageLoadId) loadingImage = false;
     }
 }
 
 function ensureBlurTextures(width, height, outputExtraUsage = 0) {
-    if (!tex_blur_tmp || tex_blur_tmp.width !== width || tex_blur_tmp.height !== height) {
-        if (tex_blur_tmp) tex_blur_tmp.destroy();
-        tex_blur_tmp = createTexture2D(width, height);
-    }
     // Recreate the output when switching between render and compute blur paths.
     const storageUsage = outputExtraUsage & GPUTextureUsage.STORAGE_BINDING;
     if (!tex_blurred || tex_blurred.width !== width || tex_blurred.height !== height ||
@@ -630,10 +634,11 @@ async function render(captureFrame = null, skipBlur = false) {
     const { width, height } = cur_image_size;
     if (width === 0 || height === 0) return;
 
-    // Ensure blur textures exist
+    const hasBlur = !skipBlur && (blur_params.radius_x > 0 || blur_params.radius_y > 0);
+    // Allocate an output only when a blur actually needs it.
     const recursiveBlur = blur_params.mode === BlurMode.FAST_GAUSSIAN &&
         Math.max(blur_params.radius_x, blur_params.radius_y) >= 9;
-    ensureBlurTextures(width, height, recursiveBlur ? GPUTextureUsage.STORAGE_BINDING : 0);
+    if (hasBlur) ensureBlurTextures(width, height, recursiveBlur ? GPUTextureUsage.STORAGE_BINDING : 0);
 
     // Reset resource pools for this frame
     resetKawaseUniformBufferPool();
@@ -642,7 +647,6 @@ async function render(captureFrame = null, skipBlur = false) {
     intermediateTextures = [];
 
     const commandEncoder = gpu_device.createCommandEncoder();
-    const hasBlur = !skipBlur && (blur_params.radius_x > 0 || blur_params.radius_y > 0);
 
     // Determine which texture to display (before selection override)
     let blurredOutput = tex_source;
@@ -663,7 +667,9 @@ async function render(captureFrame = null, skipBlur = false) {
             blurReducedGaussian(commandEncoder, tex_source, tex_blurred);
             blurredOutput = tex_blurred;
         } else {
-            // Horizontal pass: input -> temp
+            const tex_blur_tmp = blur_params.radius_x > 0 && blur_params.radius_y > 0
+                ? getCachedTexture(width, height) : tex_blurred;
+            // Horizontal pass: input -> temp (or directly to output for X only)
             if (blur_params.radius_x > 0) {
                 separablePass(commandEncoder, tex_source, tex_blur_tmp, blur_params.mode, true, blur_params.radius_x);
                 intermediateTextures.push({
@@ -730,13 +736,14 @@ function setupEventHandlers() {
     });
 
     // Click to browse
-    dropzone.addEventListener('click', () => {
-        fileInput.click();
+    dropzone.addEventListener('click', (e) => {
+        if (e.target !== fileInput) fileInput.click();
     });
 
     fileInput.addEventListener('change', (e) => {
         if (e.target.files.length > 0) {
             handleImageFile(e.target.files[0]);
+            fileInput.value = '';
         }
     });
 
@@ -769,24 +776,9 @@ function setupEventHandlers() {
 
     // Sample file links
     document.querySelectorAll('.sample-link').forEach(link => {
-        link.addEventListener('click', async (e) => {
+        link.addEventListener('click', (e) => {
             e.preventDefault();
-            if (renderingVideo) return;
-            const src = link.dataset.src;
-            const statusEl = document.getElementById('status');
-            const errorEl = document.getElementById('error');
-            try {
-                statusEl.textContent = `Loading ${src}...`;
-                errorEl.textContent = '';
-                const response = await fetch(src);
-                if (!response.ok) throw new Error(`Failed to fetch ${src}`);
-                const blob = await response.blob();
-                const file = new File([blob], src.split('/').pop(), { type: blob.type });
-                handleImageFile(file);
-            } catch (err) {
-                errorEl.textContent = `Error loading sample ${src}: ${err.message}`;
-                statusEl.textContent = '';
-            }
+            handleImageFile(link.dataset.src);
         });
     });
 
@@ -859,7 +851,7 @@ function setupEventHandlers() {
 
     async function renderVideoCycle(skipBlur) {
         if (renderingVideo) return;
-        if (!gpu_device || !tex_source || loadingImages) {
+        if (!gpu_device || !tex_source || loadingImage) {
             videoStatus.textContent = 'Load an image before rendering a video.';
             return;
         }
@@ -870,17 +862,19 @@ function setupEventHandlers() {
         const started = performance.now();
         renderingVideo = true;
         const resumeAnimation = animateRadius.checked;
+        const savedParams = { ...blur_params };
+        const savedSelection = selectedTextureIndex;
         animateRadius.checked = false;
         if (animationFrame !== null) cancelAnimationFrame(animationFrame);
         animationFrame = null;
         animationStart = null;
+        const controls = [...document.querySelectorAll('input, select, button')];
+        const disabledStates = controls.map(control => control.disabled);
         lockRadius.checked = false;
         blur_params.lock_radius = false;
         radiusY.disabled = false;
         radiusYRow.classList.remove('disabled');
         resetTextureSelection();
-        const controls = [...document.querySelectorAll('input, select, button')];
-        const disabledStates = controls.map(control => control.disabled);
         controls.forEach(control => { control.disabled = true; });
         const dropzone = document.getElementById('dropzone');
         dropzone.inert = true;
@@ -913,7 +907,12 @@ function setupEventHandlers() {
             renderingVideo = false;
             controls.forEach((control, i) => { control.disabled = disabledStates[i]; });
             dropzone.inert = false;
-            setAnimatedRadius(0);
+            Object.assign(blur_params, savedParams);
+            lockRadius.checked = savedParams.lock_radius;
+            radiusYRow.classList.toggle('disabled', savedParams.lock_radius);
+            radiusX.value = radiusXValue.textContent = savedParams.radius_x;
+            radiusY.value = radiusYValue.textContent = savedParams.radius_y;
+            selectedTextureIndex = savedSelection;
             render();
             animateRadius.checked = resumeAnimation;
             if (resumeAnimation) animationFrame = requestAnimationFrame(animateBlurRadius);
@@ -962,8 +961,7 @@ function onBlurParamsChanged() {
 }
 
 async function main() {
-    setupEventHandlers();
-    await initWebGPU();
+    if (await initWebGPU()) setupEventHandlers();
 }
 main();
 </script>

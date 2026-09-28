@@ -1,7 +1,8 @@
 # Blur Playground
 
 JavaScript/WebGPU implementation of several image blurring algorithms. Runs in the browser
--- open `index.html` (requires WebGPU capable browser).
+-- open `index.html` (requires WebGPU capable browser with `float32-filterable` and
+`float32-blendable` features).
 
 In order to load provided sample image files, just opening the HTML page
 in a browser won't work. Easiest is then to run `python3 -m http.server 8000`
@@ -17,9 +18,12 @@ Blur shaders, pipelines, and algorithm helpers live in `js/`:
 - `dual-kawase.js`: Dual Kawase.
 - `fast-gaussian.js` and `skia-gaussian.js`: Fast and Skia Gaussian.
 - `gpu-helpers.js`: shared fullscreen vertex shader, GPU resource helpers, and texture cache.
+- `video-export.js`: WebCodecs H.264 encoding and a minimal MP4 writer.
+- `exrloader.js` and `fflate.js`: EXR decoding and decompression.
 
 The files use classic scripts with shared globals; GPU helpers load before the
-blur implementations, and the page initializes their pipelines after creating the device.
+blur implementations. Most pipelines are initialized after device creation;
+Fast Gaussian compute pipelines are created on first use.
 
 ### Blur Algorithms
 
@@ -31,11 +35,11 @@ blur implementations, and the page initializes their pipelines after creating th
   for small radii, Deriche for medium radii, and parallel second-order Van Vliet
   sections for large radii. See details below.
 - **Reduced Gaussian** - independent X/Y area downsampling, followed by small
-  separable Gaussian filters and cubic B-spline reconstruction. Uses just the radius
+  separable Gaussian filters and bilinear or cubic B-spline reconstruction. Uses just the radius
   controls; working resolution and filter widths are chosen internally.
 - **Skia Gaussian** - Skia’s GPU image-filter approach: progressive bilinear
   downsampling, a small Gaussian, and bilinear reconstruction. Supports independent
-  X/Y radii; see implementation and validation details below.
+  X/Y radii; see implementation details below.
 - **Dual Kawase** - multi-pass downsample/upsample pyramid blur, from
   Marius Bjørge, [Bandwidth-Efficient Rendering](https://community.arm.com/cfs-file/__key/communityserver-blogs-components-weblogfiles/00-00-00-20-66/siggraph2015_2D00_mmg_2D00_marius_2D00_notes.pdf) (SIGGRAPH 2015),
   see also explanation in [this blog post](https://blog.frost.kiwi/dual-kawase/#dual-kawase-blur).
@@ -58,7 +62,7 @@ Recursive passes use `sigma = max(radius, 1) / 3` per axis, including an axis
 set to zero, matching Blender. Both radii zero bypass blur. Boundary pixels
 extend indefinitely (Blender's non-extended-bounds mode); the initial recursive
 state uses Blender's boundary coefficients. Independent row scans are followed
-by a sum-and-transpose pass for each axis. Compute passes participate in GPU timing.
+by a sum-and-transpose pass for each axis.
 
 Textures retain the playground's RGBA32F format rather than Blender's default
 RGBA16F intermediates, so this is an algorithm match, not a bit-for-bit match.
@@ -123,8 +127,8 @@ shape variation. Radius sliders use steps of 1.
 
 ### Skia Gaussian
 
-Adapted from Google Skia revision `da51f0d60e`, matching the pinned native renderer
-in `skia/`. This is a WebGPU implementation of the algorithm, not a Skia/WASM wrapper.
+Adapted from Google Skia revision `da51f0d60e` (this is a WebGPU re-implementation
+of the algorithm, not a Skia wrapper).
 The relevant source is [SkImageFilterTypes.cpp](https://github.com/google/skia/blob/da51f0d60e/src/core/SkImageFilterTypes.cpp)
 (`FilterResult::rescale` / `Builder::blur`) and
 [SkBlurEngine.cpp](https://github.com/google/skia/blob/da51f0d60e/src/core/SkBlurEngine.cpp)
@@ -147,7 +151,6 @@ RGBA32F texture format is retained, whereas the native Metal reference uses
 RGBA16F. Half-float rounding and GPU sampler precision mean results are not
 bit-identical. Temporary textures and uniforms are reused, with the texture pool
 bounded to the current pass chain rather than every size visited during animation.
-All filtering/resampling render passes participate in the GPU timing readout.
 
 ### Dual Kawase interpolation
 
@@ -170,12 +173,16 @@ downsampling and upsampling run once, with one extra down/up pair and a blend
 at the smallest shared level. Anisotropic interpolation also shares pyramid work and blends
 before the common upsampling, but can require additional passes. Interpolation
 is continuous; its slope can change at triangle and discrete-step boundaries.
-
-Test inputs are available in the `exr/` folder.
+Interpolation uses a constant blend weight for all RGBA channels, preserving alpha.
 
 ### Performance
 
-"Render Video" time in seconds, doing an animated radius sweep, all on Chrome browser:
+**Render Video** time in seconds, doing an animated radius sweep, all on Chrome browser:
+
+The displayed time measures the full export, including rendering, canvas capture,
+H.264 encoding, and MP4 assembly. It is not an isolated GPU blur time, and there
+is no GPU timestamp readout. **Time no-op video** performs the same export with
+blur bypassed; it still renders and encodes the source image.
 
 | Scenario | Apple M4 Max | RTX 3080Ti, Windows | Intel Iris Xe, Windows |
 |----------|-------------:|------:|-------:|
@@ -187,11 +194,13 @@ Test inputs are available in the `exr/` folder.
 |Dual Kawase      |  2.26 |  2.41 |   6.01 |
 
 
-
 ### Features
 
-- Drag & drop or browse for images (PNG/JPG/EXR),
+- Drag & drop or browse for images (PNG/JPG/EXR).
 - Adjustable blur radius (X/Y can be locked or independent).
+- Inspect the source, intermediate textures, or final output with **Display Texture**.
+- **Animate** loops an eight-second radius sweep, respecting the X/Y lock.
+- **Render Video** exports an eight-second, 60 fps H.264 MP4 using WebCodecs.
 
 ### External code
 

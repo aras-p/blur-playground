@@ -41,8 +41,8 @@ function createPipeline(codeString, rtFormat = 'rgba32float', blending = false, 
     const target = { format: rtFormat };
     if (blending) {
         target.blend = {
-            color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add', },
-            alpha: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add', },
+            color: { srcFactor: 'constant', dstFactor: 'one-minus-constant', operation: 'add', },
+            alpha: { srcFactor: 'constant', dstFactor: 'one-minus-constant', operation: 'add', },
         };
     }
     return gpu_device.createRenderPipeline({
