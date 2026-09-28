@@ -1,3 +1,38 @@
+/* Reduced Gaussian approximates a wide Gaussian at lower cost by reducing each
+ * axis independently, applying a small separable filter, then reconstructing.
+ * Reduction and reconstruction already add blur, so each endpoint subtracts
+ * their approximate variances before choosing its residual Gaussian sigma.
+ *
+ * A resolution change would otherwise change the approximation abruptly. Blend
+ * neighboring grids, each computed for the SAME requested radius, before
+ * retiring the finer grid. The canonical reduction tree shares work and keeps
+ * each endpoint's sampling history independent of its current blend weight.
+ * Reconstruction samples each endpoint directly onto the final output grid.
+ *
+ * Unlike Dual Kawase, these endpoints are alternative approximations of one
+ * target blur, not fixed kernels of different widths. Area reduction, Gaussian
+ * filtering, and bilinear/cubic reconstruction are established building blocks;
+ * the variance estimates, 5–6 sigma transition, tapered tails, and triangular
+ * blending are choices of this approximation, not an exact Gaussian identity.
+ *
+ * Related work (building blocks, not a specification of this exact combination):
+ * - Fabian Giesen, "Gaussian blur kernels" (2009): prefilter before reducing,
+ *   blur at lower resolution, then reconstruct; skipping samples causes aliasing.
+ *   https://sourceforge.net/p/gdalgorithms/mailman/message/23077758/
+ * - Cornell CS5625, "Apply blur to mipmap levels" (2022): reduce by 2^k and use
+ *   sigma/2^k. Its bloom merge mixes widths, not same-target resolution choices.
+ *   https://www.cs.cornell.edu/courses/cs5625/2022sp/assignments/pipeline.html#323-apply-blur-to-mipmap-levels
+ * - Intel, "An Investigation of Fast Real-Time GPU-Based Image Blur Algorithms",
+ *   "Working in Lower Resolution": reduce, filter with a smaller kernel, upscale.
+ *   https://www.intel.com/content/www/us/en/developer/articles/technical/an-investigation-of-fast-real-time-gpu-based-image-blur-algorithms.html
+ * - Sigg & Hadwiger, GPU Gems 2, Chapter 20, "Fast Third-Order Texture Filtering":
+ *   evaluate cubic B-splines with paired hardware-linear samples.
+ *   https://developer.nvidia.com/gpugems/gpugems2/part-iii-high-quality-rendering/chapter-20-fast-third-order-texture-filtering
+ * - Bjorge, "Bandwidth-Efficient Rendering", SIGGRAPH 2015: multi-resolution
+ *   filtering. Its mixed-resolution pipeline is not our same-target crossfade.
+ *   https://community.arm.com/cfs-file/__key/communityserver-blogs-components-weblogfiles/00-00-00-20-66/siggraph2015_2D00_mmg_2D00_marius_2D00_notes.pdf
+ */
+
 /** @type {GPURenderPipeline} */
 let pip_reduced_gaussian = null;
 let pip_reduced_down = null;
@@ -9,6 +44,8 @@ let reducedUniformBufferIndex = 0;
 function initReducedGaussian() {
     pip_reduced_gaussian = createPipeline(REDUCED_GAUSSIAN_SHADER);
     pip_reduced_down = createPipeline(REDUCED_DOWNSAMPLE_SHADER);
+    // Two specializations of one reconstruction shader, not two blur algorithms.
+    // The general variant can still use bilinear on either axis independently.
     pip_reduced_mix = createPipeline(REDUCED_MIX_SHADER);
     pip_reduced_mix_bilinear = createPipeline(REDUCED_MIX_SHADER, undefined, false,
         { ALL_BILINEAR: true });
@@ -97,6 +134,9 @@ struct Params {
 // Bilinear through 2× enlargement on each axis; positive cubic B-spline
 // beyond that to avoid coarse-grid facets without ringing. This uses one,
 // two, or four bilinear samples depending on how many axes need cubic.
+// Pair adjacent positive B-spline weights: a sample at w1/(w0+w1) between
+// two texel centers, multiplied by w0+w1, equals their weighted sum. Pairing
+// four taps this way needs two linear reads per cubic axis (four in 2D).
 // Each axis returns (first position, second position, second group weight).
 fn cubicAxis(uv: f32, size: f32, outputSize: f32) -> vec3f {
     if (2.0 * size >= outputSize) { return vec3f(uv, uv, 0.0); }
@@ -182,6 +222,9 @@ function reducedAxisPlan(radius, size) {
     const sigma = Math.max(0, radius) / 3;
     let level = 0;
     // Ceil-sized levels support odd dimensions and stop at a single texel.
+    // Use the actual size ratio, not 2**level: e.g. 5 -> 3 is a 5/3 reduction.
+    // At working sigma 5 start the crossfade, and at 6 advance the base level.
+    // Both endpoints still use the original target sigma in endpoint().
     const maxLevel = Math.ceil(Math.log2(size));
     const scale = level => size / Math.ceil(size / 2 ** level);
     while (level < maxLevel && sigma >= 6 * scale(level)) level++;
@@ -201,10 +244,16 @@ function reducedGaussianAxis(encoder, input, sigma, horizontal, destination = nu
         const t = Math.max(0, Math.min(1, 4 - x));
         return Math.exp(-0.5 * x * x) * t * t * (3 - 2 * t);
     };
+    // Twelve paired taps cover 24 texels on each side, enough for 4*sigma
+    // while the normal level plan keeps working sigma below 6. If reduction
+    // stops at one logical texel, the cap still bounds the cost but truncates
+    // wider kernels; this extreme case remains an approximation.
     const count = Math.min(12, Math.ceil(4 * sigma / 2));
     let sum = 1;
     for (let j = 0; j < count; j++) {
         const i = 2 * j + 1;
+        // One linear sample at i + b/(a+b), weighted by a+b, replaces the
+        // two neighboring taps exactly (apart from sampler/float precision).
         const a = weight(i), b = weight(i + 1), w = a + b;
         data[4 + j * 4] = w > 0 ? i + b / w : i;
         data[5 + j * 4] = w;
@@ -269,6 +318,12 @@ function blurReducedGaussian(encoder, input, output) {
         const entry = down(lx, ly);
         const sx = input.width / entry.width;
         const sy = input.height / entry.height;
+        // Variances add under convolution. In original-image pixel units:
+        // targetSigma^2 ~= reductionVariance + (scale * residualSigma)^2
+        //                  + reconstructionVariance.
+        // Solve per axis, clamp at zero, then convert sigma to reduced texels.
+        // Resampling is phase-dependent, so this is a width estimate rather
+        // than an exact description of the resulting kernel or its borders.
         const sigmaX = Math.sqrt(Math.max(0, x.sigma ** 2 - entry.vx - reconstructionVariance(sx))) / sx;
         const sigmaY = Math.sqrt(Math.max(0, y.sigma ** 2 - entry.vy - reconstructionVariance(sy))) / sy;
         const filterY = sigmaY >= 0.01 && entry.texture.height > 1;
@@ -294,6 +349,10 @@ function blurReducedGaussian(encoder, input, output) {
     const diagonalWeight = Math.min(x.blend, y.blend);
     // Split the blend square along (0,0)--(1,1). On that diagonal only
     // matching-resolution endpoints contribute; elsewhere use one neighbor.
+    // For fractions tx,ty the weights are 1-max(tx,ty), abs(tx-ty), min(tx,ty).
+    // They are nonnegative and sum to one. Compared with four-corner bilinear
+    // interpolation this saves one endpoint, with a possible slope change at
+    // the diagonal; shared edge weights keep the result continuous.
     const b = middleWeight > 0
         ? endpoint(x.level + (x.blend > y.blend ? 1 : 0),
                    y.level + (y.blend > x.blend ? 1 : 0)) : a;

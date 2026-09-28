@@ -79,6 +79,11 @@ a zero-radius axis keeps its original resolution and is not filtered. Exact 2×
 downsampling uses one bilinear sample, including when only one axis is reduced;
 odd-sized reductions integrate pixel areas to preserve bright points. The residual
 Gaussian compensates approximately for reduction and reconstruction variance.
+For an axis reduced by a factor `s`, its working sigma is
+`sqrt(max(0, targetSigma² - reductionVariance - reconstructionVariance)) / s`.
+The variance terms are measured in original-image pixels squared. This avoids
+adding a full-width Gaussian on top of blur already introduced by resizing;
+resampling phase and boundary effects make the compensation approximate.
 
 Each reduced axis has a one-texel border on both sides. Reduction preserves the
 source edge/corner values there instead of extending averaged interior pixels;
@@ -124,6 +129,35 @@ resize appearing or disappearing at a boundary. Kernel tails taper smoothly as
 the tap count changes. This prioritizes smooth radius changes and a rounded blur
 shape over exact Gaussian matching; resampling still introduces some phase-dependent
 shape variation. Radius sliders use steps of 1.
+
+Area reduction, separable Gaussian filtering, and reconstruction are the building
+blocks. The variance estimates, transition thresholds, tapered tails, and choice
+of three endpoints define this particular approximation. Unlike Dual Kawase's
+blend between fixed blur widths, Reduced Gaussian's endpoints all target the
+same requested width; their blend hides a change of working resolution.
+
+Related work for the building blocks:
+
+- Fabian Giesen, [Gaussian blur kernels (2009)](https://sourceforge.net/p/gdalgorithms/mailman/message/23077758/):
+  low-pass filtering before downsampling, a main blur at reduced resolution,
+  and reconstruction afterward. His warning about thin objects flickering when
+  downsampling skips samples motivates careful reduction, though his suggested
+  prefilters differ from our area integration.
+- Cornell CS5625, [Apply blur to mipmap levels (2022)](https://www.cs.cornell.edu/courses/cs5625/2022sp/assignments/pipeline.html#323-apply-blur-to-mipmap-levels):
+  an explicit recipe to downsample by `2^k`, blur with sigma `sigma / 2^k`, and
+  upsample. This describes the basic structure of one endpoint before our
+  variance compensation. Its bloom merge combines different blur widths,
+  rather than alternative resolutions of the same target width.
+- Intel, [An Investigation of Fast Real-Time GPU-Based Image Blur Algorithms](https://www.intel.com/content/www/us/en/developer/articles/technical/an-investigation-of-fast-real-time-gpu-based-image-blur-algorithms.html),
+  **Working in Lower Resolution**: downsample, apply a smaller Gaussian, then upscale.
+- Sigg and Hadwiger, [GPU Gems 2, Chapter 20: Fast Third-Order Texture Filtering](https://developer.nvidia.com/gpugems/gpugems2/part-iii-high-quality-rendering/chapter-20-fast-third-order-texture-filtering):
+  cubic B-spline reconstruction using paired hardware-linear samples.
+- Bjørge, [Bandwidth-Efficient Rendering, SIGGRAPH 2015](https://community.arm.com/cfs-file/__key/communityserver-blogs-components-weblogfiles/00-00-00-20-66/siggraph2015_2D00_mmg_2D00_marius_2D00_notes.pdf):
+  filtering across multiple resolutions. Its mixed-resolution pipeline is distinct
+  from crossfading alternative grids for the same target blur here.
+
+These sources explain individual techniques, not the exact Reduced Gaussian
+combination implemented in this playground.
 
 ### Skia Gaussian
 
@@ -174,6 +208,21 @@ at the smallest shared level. Anisotropic interpolation also shares pyramid work
 before the common upsampling, but can require additional passes. Interpolation
 is continuous; its slope can change at triangle and discrete-step boundaries.
 Interpolation uses a constant blend weight for all RGBA channels, preserving alpha.
+
+The remapping can be motivated by assuming neighboring kernel widths are `r`
+and `2r`. Variance interpolation gives a weight of
+`((r * (1 + t))² - r²) / ((2r)² - r²) = t * (2 + t) / 3`.
+Actual Kawase kernels only approximately follow this model, and the first
+interval (radius 0 to 6) uses the same remapping as a heuristic. The radius scale
+is an approximate visual match to Gaussian blur, not an exact sigma calibration.
+
+For remapped X/Y fractions `tx` and `ty`, the three weights are
+`1 - max(tx, ty)`, `abs(tx - ty)`, and `min(tx, ty)`. The middle endpoint advances
+the axis with the larger fraction; the other two advance neither or both.
+These nonnegative weights sum to one and agree along shared triangle edges.
+Blending before the common upsample suffix is valid because that fixed filter
+is linear: `U(sum(w_i * image_i)) = sum(w_i * U(image_i))`. This requires the
+same grids and sampling path for the shared suffix, including on odd-sized images.
 
 ### Performance
 

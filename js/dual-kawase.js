@@ -1,3 +1,26 @@
+/* Dual Kawase builds a pyramid with a five-sample downsample filter and an
+ * eight-sample upsample filter. Working on progressively fewer pixels makes
+ * large blurs cheap, but the basic pyramid only produces discrete blur widths.
+ * Here radius selects neighboring fixed kernels; a weighted blend fills the
+ * gaps. Independent X/Y choices form a cell, triangulated into at most three
+ * endpoints so equal radii need only two isotropic kernels.
+ *
+ * Endpoints share their downsample prefixes. They are brought back to a common
+ * grid and blended there before the shared upsample suffix. Since that suffix
+ * is linear, U(sum(w_i * image_i)) = sum(w_i * U(image_i)); this avoids separate
+ * full-resolution reconstructions. Sampling paths and grids must match for
+ * this rearrangement to preserve the result (up to floating-point rounding).
+ *
+ * Radius/3 is an approximate visual mapping to Gaussian-like blur sizes, not
+ * a measured sigma. The resulting kernels are not Gaussian and can retain
+ * pyramid structure, especially around isolated highlights or at small sizes.
+ *
+ * Original down/up filters: Marius Bjorge, "Bandwidth-Efficient Rendering",
+ * SIGGRAPH 2015, "Dual filtering". The radius mapping, triangular X/Y blending,
+ * and shared-branch scheduling below extend that basic filter pyramid.
+ * https://community.arm.com/cfs-file/__key/communityserver-blogs-components-weblogfiles/00-00-00-20-66/siggraph2015_2D00_mmg_2D00_marius_2D00_notes.pdf
+ */
+
 /** @type {GPURenderPipeline} */
 let pip_dk_down = null;
 /** @type {GPURenderPipeline} */
@@ -89,7 +112,9 @@ function kawaseDownsample(commandEncoder, input, fullSizeX, fullSizeY, divisorX,
     const sizeY = Math.max(Math.floor(fullSizeY / Math.max(divisorY,1)), 1);
     const output = getCachedTexture(sizeX, sizeY);
 
-    // Note: "step" is based on *output* size, which is 2x smaller than input
+    // Downsample offsets use destination texels; for an exact half-size step,
+    // the shader's +/-0.5 offset is one source texel. Odd sizes use the actual
+    // destination dimensions. ratioX/Y are axis masks (0 or 1), not blend weights.
     const stepX = ratioX / sizeX;
     const stepY = ratioY / sizeY;
 
@@ -128,7 +153,9 @@ function kawaseUpsample(commandEncoder, input, fullSizeX, fullSizeY, divisorX, d
     const sizeY = Math.max(Math.floor(fullSizeY / Math.max(divisorY,1)), 1);
     const output = getCachedTexture(sizeX, sizeY);
 
-    // Note: "step" is based on *input* size, which is 2x smaller than output
+    // Upsample offsets use source texels. An axis that is inactive in this
+    // pass has zero offset; its resolution is controlled separately by divisor.
+    // The ratioX/Y axis masks are unrelated to the interpolation fraction.
     const stepX = ratioX / input.width;
     const stepY = ratioY / input.height;
 
@@ -206,7 +233,11 @@ function kawaseRadiusInterval(radius) {
     }
     const t = (steps - lower) / (upper - lower);
     // Blending kernels interpolates variance. Remap the weight to make blur
-    // width grow more evenly between doubling steps.
+    // width grow more evenly between doubling steps. If endpoint widths are
+    // r and 2r and the desired width is r*(1+t), the variance-matching weight
+    // is ((1+t)^2 - 1)/(4 - 1) = t*(2+t)/3. Real Kawase kernels only roughly
+    // follow this model. We also use the remap for 0 -> 6 as a heuristic;
+    // that first interval does not satisfy the doubling-width derivation.
     return { lower, upper, fraction: t * (2.0 + t) / 3.0 };
 }
 
@@ -219,6 +250,11 @@ function blurDualKawase(commandEncoder, input, output) {
     // Triangulate the radius cell along its lower/lower -> upper/upper diagonal.
     // Equal radii use just the two isotropic endpoints; elsewhere at most three
     // discrete kernels contribute. Adjacent triangles/cells share their edges.
+    // With remapped fractions tx,ty, weights are 1-max(tx,ty), abs(tx-ty),
+    // min(tx,ty). They sum to one; the middle endpoint advances whichever
+    // axis has the larger fraction. On the diagonal its weight is zero.
+    // This saves the fourth corner of bilinear interpolation, at the cost
+    // of a possible slope change along the triangle boundary.
     const corners = [
         { x: x.lower, y: y.lower, weight: 1.0 - Math.max(x.fraction, y.fraction) },
         x.fraction >= y.fraction
@@ -276,6 +312,9 @@ function blurDualKawase(commandEncoder, input, output) {
     // The last corner owns a filtered texture whenever blending is needed;
     // never blend into the source or the saved common pyramid texture.
     curr = textures[textures.length - 1];
+    // Maintain a normalized weighted average of the accumulated corners.
+    // Each mix uses incomingWeight / newTotalWeight, not the raw corner
+    // weight, so two in-place blends reproduce the three-corner weighted sum.
     let weight = corners[corners.length - 1].weight;
     for (let i = corners.length - 2; i >= 0; --i) {
         weight += corners[i].weight;
