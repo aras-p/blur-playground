@@ -101,6 +101,18 @@ body {
     color: #bbb;
     font-variant-numeric: tabular-nums;
 }
+#renderVideo {
+    margin-top: 5px;
+    padding: 6px 10px;
+    background: #383838;
+    border: 1px solid #555;
+    border-radius: 4px;
+    color: #e0e0e0;
+    cursor: pointer;
+}
+#renderVideo:disabled { opacity: 0.5; cursor: default; }
+#videoStatus { max-width: 290px; font-size: 12px; color: #bbb; }
+#videoStatus a { color: #acd1ff; }
 #status {
     margin-top: 10px;
     color: #888;
@@ -219,6 +231,8 @@ body {
             <input type="checkbox" id="animateRadius">
             <label for="animateRadius">Animate</label>
         </div>
+        <button type="button" id="renderVideo">Render Video</button>
+        <div id="videoStatus" role="status" aria-live="polite"></div>
     </div>
 
 </div>
@@ -239,6 +253,7 @@ body {
 <script src="exrloader.js"></script>
 <script src="fast-gaussian.js"></script>
 <script src="skia-gaussian.js"></script>
+<script src="video-export.js"></script>
 <script>
 // ================ Shaders
 const FULLSCREEN_VERTEX_SHADER = `
@@ -735,7 +750,12 @@ async function loadEXR(file) {
     return { data: flipped, width, height };
 }
 
+let renderingVideo = false;
+let loadingImages = 0;
+
 async function handleImageFile(file) {
+    if (renderingVideo) return;
+    loadingImages++;
     const statusEl = document.getElementById('status');
     const errorEl = document.getElementById('error');
     const canvas = document.getElementById('canvas');
@@ -782,6 +802,8 @@ async function handleImageFile(file) {
         errorEl.textContent = `Error: ${e.message}`;
         statusEl.textContent = 'Failed to load image.';
         console.error('Image load error:', e);
+    } finally {
+        loadingImages--;
     }
 }
 
@@ -1439,7 +1461,7 @@ async function readBlurTiming(timing, generation) {
 
 // ================ Rendering
 
-async function render() {
+async function render(captureFrame = null) {
     if (!gpu_device || !tex_source) return;
 
     const { width, height } = cur_image_size;
@@ -1551,6 +1573,8 @@ async function render() {
 
     gpu_device.queue.submit([commandEncoder.finish()]);
     if (timing) void readBlurTiming(timing, timingGeneration);
+    // Snapshot in the same task, before WebGPU presents/clears the canvas.
+    if (captureFrame) return captureFrame();
 }
 
 // ================ Event handlers
@@ -1607,6 +1631,7 @@ function setupEventHandlers() {
     document.querySelectorAll('.sample-link').forEach(link => {
         link.addEventListener('click', async (e) => {
             e.preventDefault();
+            if (renderingVideo) return;
             const src = link.dataset.src;
             const statusEl = document.getElementById('status');
             const errorEl = document.getElementById('error');
@@ -1646,12 +1671,9 @@ function setupEventHandlers() {
     let animationFrame = null;
     let animationStart = null;
 
-    function animateBlurRadius(timestamp) {
-        if (!animateRadius.checked) return;
-        if (animationStart === null) animationStart = timestamp;
-
+    function setAnimatedRadius(elapsed) {
         // Two seconds per leg: grow both axes, shrink X, then shrink Y.
-        const phase = ((timestamp - animationStart) / 2000) % 3;
+        const phase = (elapsed / (BLUR_ANIMATION_DURATION / 3)) % 3;
         const x = phase < 1 ? phase : phase < 2 ? 2 - phase : 0;
         const y = blur_params.lock_radius ? x : phase < 1 ? phase : phase < 2 ? 1 : 3 - phase;
         const min = Number(radiusX.min);
@@ -1662,6 +1684,12 @@ function setupEventHandlers() {
         radiusY.value = blur_params.radius_y;
         radiusXValue.textContent = blur_params.radius_x;
         radiusYValue.textContent = blur_params.radius_y;
+    }
+
+    function animateBlurRadius(timestamp) {
+        if (!animateRadius.checked) return;
+        if (animationStart === null) animationStart = timestamp;
+        setAnimatedRadius(timestamp - animationStart);
         onBlurParamsChanged();
         animationFrame = requestAnimationFrame(animateBlurRadius);
     }
@@ -1671,6 +1699,72 @@ function setupEventHandlers() {
         animationFrame = null;
         animationStart = null;
         if (animateRadius.checked) animationFrame = requestAnimationFrame(animateBlurRadius);
+    });
+
+    const renderVideo = document.getElementById('renderVideo');
+    const videoStatus = document.getElementById('videoStatus');
+    let videoURL = null;
+    renderVideo.addEventListener('click', async () => {
+        if (renderingVideo) return;
+        if (!gpu_device || !tex_source || loadingImages) {
+            videoStatus.textContent = 'Load an image before rendering a video.';
+            return;
+        }
+        if (typeof VideoEncoder === 'undefined') {
+            videoStatus.textContent = 'Video export requires a browser with WebCodecs video encoding (HTTPS or localhost).';
+            return;
+        }
+        const started = performance.now();
+        renderingVideo = true;
+        const resumeAnimation = animateRadius.checked;
+        animateRadius.checked = false;
+        if (animationFrame !== null) cancelAnimationFrame(animationFrame);
+        animationFrame = null;
+        animationStart = null;
+        lockRadius.checked = false;
+        blur_params.lock_radius = false;
+        radiusY.disabled = false;
+        radiusYRow.classList.remove('disabled');
+        resetTextureSelection();
+        const controls = [...document.querySelectorAll('input, select, button')];
+        const disabledStates = controls.map(control => control.disabled);
+        controls.forEach(control => { control.disabled = true; });
+        const dropzone = document.getElementById('dropzone');
+        dropzone.inert = true;
+        videoStatus.textContent = 'Preparing video…';
+        if (videoURL) { URL.revokeObjectURL(videoURL); videoURL = null; }
+        try {
+            const method = blur_params.mode;
+            const blob = await exportBlurVideo({
+                canvas: document.getElementById('canvas'),
+                renderFrame: (elapsed, capture) => {
+                    setAnimatedRadius(elapsed);
+                    return render(capture);
+                },
+                onProgress: (done, total) => {
+                    videoStatus.textContent = `Rendering video: ${done}/${total} frames…`;
+                },
+            });
+            videoURL = URL.createObjectURL(blob);
+            const download = document.createElement('a');
+            download.href = videoURL;
+            download.download = `blur-anim-${method}.mp4`;
+            download.textContent = 'Download again';
+            videoStatus.replaceChildren(download);
+            download.click();
+            const elapsed = ((performance.now() - started) / 1000).toFixed(2);
+            videoStatus.prepend(`Rendered and encoded in ${elapsed}s (6s video, 60 fps). `);
+        } catch (error) {
+            videoStatus.textContent = `Video export failed: ${error.message}`;
+        } finally {
+            renderingVideo = false;
+            controls.forEach((control, i) => { control.disabled = disabledStates[i]; });
+            dropzone.inert = false;
+            setAnimatedRadius(0);
+            render();
+            animateRadius.checked = resumeAnimation;
+            if (resumeAnimation) animationFrame = requestAnimationFrame(animateBlurRadius);
+        }
     });
 
     radiusX.addEventListener('input', (e) => {
