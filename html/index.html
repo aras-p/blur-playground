@@ -215,6 +215,10 @@ body {
             <input type="checkbox" id="lockRadius">
             <label for="lockRadius">Lock X & Y</label>
         </div>
+        <div class="checkbox-row">
+            <input type="checkbox" id="animateRadius">
+            <label for="animateRadius">Animate</label>
+        </div>
     </div>
 
 </div>
@@ -1638,6 +1642,36 @@ function setupEventHandlers() {
     const radiusYValue = document.getElementById('radiusYValue');
     const radiusYRow = document.getElementById('radiusYRow');
     const lockRadius = document.getElementById('lockRadius');
+    const animateRadius = document.getElementById('animateRadius');
+    let animationFrame = null;
+    let animationStart = null;
+
+    function animateBlurRadius(timestamp) {
+        if (!animateRadius.checked) return;
+        if (animationStart === null) animationStart = timestamp;
+
+        // Two seconds per leg: grow both axes, shrink X, then shrink Y.
+        const phase = ((timestamp - animationStart) / 2000) % 3;
+        const x = phase < 1 ? phase : phase < 2 ? 2 - phase : 0;
+        const y = blur_params.lock_radius ? x : phase < 1 ? phase : phase < 2 ? 1 : 3 - phase;
+        const min = Number(radiusX.min);
+        const max = Number(radiusX.max);
+        blur_params.radius_x = Math.round(min + x * (max - min));
+        blur_params.radius_y = Math.round(min + y * (max - min));
+        radiusX.value = blur_params.radius_x;
+        radiusY.value = blur_params.radius_y;
+        radiusXValue.textContent = blur_params.radius_x;
+        radiusYValue.textContent = blur_params.radius_y;
+        onBlurParamsChanged();
+        animationFrame = requestAnimationFrame(animateBlurRadius);
+    }
+
+    animateRadius.addEventListener('change', () => {
+        if (animationFrame !== null) cancelAnimationFrame(animationFrame);
+        animationFrame = null;
+        animationStart = null;
+        if (animateRadius.checked) animationFrame = requestAnimationFrame(animateBlurRadius);
+    });
 
     radiusX.addEventListener('input', (e) => {
         const value = parseFloat(e.target.value);
