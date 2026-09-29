@@ -280,7 +280,7 @@ Deselected methods are skipped; remaining methods retain their chart colors and
 Smol Gaussian remains last. Select at least one method before starting.
 
 **Benchmark** measures Gaussian, Fast Gaussian, Dual Kawase, Skia Gaussian, Ryg Blur, and Smol Gaussian
-on the loaded image with equal X/Y radii, from 5 to 1000 at approximately 1.2×
+on the loaded image with equal X/Y radii, from 5 to 1000 at approximately 1.4×
 spacing. After a warm-up sweep, it runs four sweeps and plots the minimum
 batch-average milliseconds per frame at each radius. Each batch waits for the
 WebGPU queue before and after timing; CPU command preparation, GPU execution,

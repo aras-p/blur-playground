@@ -9,7 +9,7 @@ async function benchmarkBlur({ device, methods, setCase, renderFrame, onProgress
         check();
     }
     const radii = [];
-    for (let r = 5; r < 1000 / 1.1; r *= 1.2) radii.push(Math.round(r));
+    for (let r = 5; r < 1000 / 1.1; r *= 1.4) radii.push(Math.round(r));
     // Merge the last near-endpoint sample into 1000 to keep labels readable.
     radii.push(1000);
     const series = methods.map(method => ({ ...method, points: radii.map(radius => ({ radius, samples: [], iterations: 1 })) }));
@@ -107,9 +107,10 @@ function makeBenchmarkSVG({ series, sweeps }, width, height) {
     }
     parts.push('<text x="567.5" y="528" text-anchor="middle" font-size="15">Blur radius (pixels)</text>',
         '<text transform="translate(25 275) rotate(-90)" text-anchor="middle" font-size="15">Time, ms</text>');
+    const lineStyle = s => `stroke-width="${s.lineWidth ?? (s.emphasized ? 4 : 2.5)}"${s.dashArray ? ` stroke-dasharray="${escape(s.dashArray)}" stroke-linecap="round"` : ''}`;
     const labels = [];
     for (const result of series) {
-        parts.push(`<polyline points="${result.points.map(p => `${x(p.radius)},${y(p.ms)}`).join(' ')}" fill="none" stroke="${result.color}" stroke-width="${result.emphasized ? 4 : 2.5}"/>`);
+        parts.push(`<polyline points="${result.points.map(p => `${x(p.radius)},${y(p.ms)}`).join(' ')}" fill="none" stroke="${result.color}" ${lineStyle(result)}/>`);
     }
     // Place labels together by radius, separating close methods vertically.
     for (let i = 0; i < radii.length; ++i) {
@@ -132,7 +133,7 @@ function makeBenchmarkSVG({ series, sweeps }, width, height) {
         const columns = series.length > 5 ? 3 : series.length;
         const lx = 95 + (i % columns) * (1000 / columns);
         const ly = 557 + Math.floor(i / columns) * 28;
-        parts.push(`<path d="M${lx} ${ly}h28" stroke="${s.color}" stroke-width="${s.emphasized ? 4 : 2.5}"/><text x="${lx + 38}" y="${ly + 5}" font-size="15" font-weight="${s.emphasized ? 700 : 400}">${escape(s.name)}</text>`);
+        parts.push(`<path d="M${lx} ${ly}h28" stroke="${s.color}" ${lineStyle(s)}/><text x="${lx + 38}" y="${ly + 5}" font-size="15" font-weight="${s.emphasized ? 700 : 400}">${escape(s.name)}</text>`);
     });
     parts.push('</g></svg>');
     return parts.join('\n');
