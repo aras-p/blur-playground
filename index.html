@@ -222,6 +222,10 @@ body {
             <input type="checkbox" id="disableSmolBlending">
             <label for="disableSmolBlending">No level blend (smol)</label>
         </div>
+        <div class="checkbox-row">
+            <input type="checkbox" id="disableSmol4xReduction">
+            <label for="disableSmol4xReduction">No 4x reduction (smol)</label>
+        </div>
         <label for="rygBoxCount">Iteratons (ryg)</label>
         <div class="slider-row">
             <input type="range" id="rygBoxCount" min="1" max="5" step="1" value="3" disabled>
@@ -370,6 +374,7 @@ const BlurMode = {
 const blur_params = {
     mode: BlurMode.SMOL_GAUSSIAN,
     disable_smol_blending: false,
+    disable_smol_4x_reduction: false,
     ryg_box_count: 3,
     radius_x: 96,
     radius_y: 96,
@@ -837,11 +842,19 @@ function setupEventHandlers() {
         resetTextureSelection();
         onBlurParamsChanged();
     });
+    const disableSmol4xReduction = document.getElementById('disableSmol4xReduction');
+    disableSmol4xReduction.disabled = blur_params.mode !== BlurMode.SMOL_GAUSSIAN;
+    disableSmol4xReduction.addEventListener('change', (e) => {
+        blur_params.disable_smol_4x_reduction = e.target.checked;
+        resetTextureSelection();
+        onBlurParamsChanged();
+    });
     document.querySelectorAll('input[name="blurMode"]').forEach(radio => {
         radio.addEventListener('change', (e) => {
             blur_params.mode = e.target.value;
             rygBoxCount.disabled = blur_params.mode !== BlurMode.RYG;
             disableSmolBlending.disabled = blur_params.mode !== BlurMode.SMOL_GAUSSIAN;
+            disableSmol4xReduction.disabled = blur_params.mode !== BlurMode.SMOL_GAUSSIAN;
             // Reset texture selection to final output when blur mode changes
             resetTextureSelection();
             onBlurParamsChanged();

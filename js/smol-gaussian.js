@@ -37,6 +37,7 @@
 /** @type {GPURenderPipeline} */
 let pip_smol_gaussian = null;
 let pip_smol_down = null;
+let pip_smol_down4 = null;
 let pip_smol_mix = null;
 let pip_smol_mix_bilinear = null;
 const smolUniformBuffers = [];
@@ -45,6 +46,7 @@ let smolUniformBufferIndex = 0;
 function initSmolGaussian() {
     pip_smol_gaussian = createPipeline(SMOL_GAUSSIAN_SHADER);
     pip_smol_down = createPipeline(SMOL_DOWNSAMPLE_SHADER);
+    pip_smol_down4 = createPipeline(SMOL_DOWNSAMPLE4_SHADER);
     // Two specializations of one reconstruction shader, not two blur algorithms.
     // The general variant can still use bilinear on either axis independently.
     pip_smol_mix = createPipeline(SMOL_MIX_SHADER);
@@ -134,6 +136,47 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
             b = mix(b, textureSampleLevel(tex, smp, vec2f(x.y, y.y), 0.0), x.z);
         }
         a = mix(a, b, y.z);
+    }
+    return a;
+}
+`;
+
+// Fuse two exact halves. Each linear lookup averages a 2×2 block; four
+// lookups cover a 4×4 footprint. Unchanged axes and preserved borders use
+// a single coordinate, retaining the reduction tree's edge behavior.
+const SMOL_DOWNSAMPLE4_SHADER = FULLSCREEN_VERTEX_SHADER + `
+struct Params { source: vec4f, destination: vec4f, }
+@group(0) @binding(0) var smp: sampler;
+@group(0) @binding(1) var tex: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+    let physicalSize = vec2f(textureDimensions(tex));
+    let scale = params.source.xy / params.destination.xy;
+    let pixel = floor(in.position.xy) - params.destination.zw;
+    var center = (pixel + 0.5) * scale + params.source.zw;
+    var offset = select(vec2f(0.0), vec2f(1.0), scale == vec2f(4.0));
+    for (var axis = 0u; axis < 2u; axis++) {
+        if (pixel[axis] < 0.0) {
+            center[axis] = 0.5;
+            offset[axis] = 0.0;
+        } else if (pixel[axis] >= params.destination[axis]) {
+            center[axis] = physicalSize[axis] - 0.5;
+            offset[axis] = 0.0;
+        }
+    }
+    let lo = (center - offset) / physicalSize;
+    let hi = (center + offset) / physicalSize;
+    var a = textureSampleLevel(tex, smp, lo, 0.0);
+    if (scale.x == 4.0) {
+        a = 0.5 * (a + textureSampleLevel(tex, smp, vec2f(hi.x, lo.y), 0.0));
+    }
+    if (scale.y == 4.0) {
+        var b = textureSampleLevel(tex, smp, vec2f(lo.x, hi.y), 0.0);
+        if (scale.x == 4.0) {
+            b = 0.5 * (b + textureSampleLevel(tex, smp, hi, 0.0));
+        }
+        a = 0.5 * (a + b);
     }
     return a;
 }
@@ -305,6 +348,57 @@ function blurSmolGaussian(encoder, input, output) {
     // Keep the selected levels, but skip neighboring endpoints and switch
     // levels abruptly at the existing reduction thresholds.
     if (blur_params.disable_smol_blending) x.blend = y.blend = 0;
+    const middleWeight = Math.abs(x.blend - y.blend);
+    const diagonalWeight = Math.min(x.blend, y.blend);
+    const neighborX = x.level + (x.blend > y.blend ? 1 : 0);
+    const neighborY = y.level + (y.blend > x.blend ? 1 : 0);
+    // Know every active endpoint before building the tree: fusion must not
+    // skip a level that another endpoint needs.
+    const required = new Set([`${x.level},${y.level}`]);
+    if (middleWeight > 0) required.add(`${neighborX},${neighborY}`);
+    if (diagonalWeight > 0) required.add(`${x.level + 1},${y.level + 1}`);
+    const predecessor = (lx, ly) => lx > ly ? [lx - 1, ly]
+        : ly > lx ? [lx, ly - 1] : [lx - 1, ly - 1];
+    const reductionPlan = new Map();
+    if (!blur_params.disable_smol_4x_reduction) {
+        // Build the union of endpoint paths before choosing fusions. Branch points
+        // must remain available so all endpoints share the same reduction prefix.
+        const children = new Map();
+        for (const endpoint of required) {
+            let key = endpoint;
+            while (key !== '0,0') {
+                const [lx, ly] = key.split(',').map(Number);
+                const parent = predecessor(lx, ly).join(',');
+                if (!children.has(parent)) children.set(parent, new Set());
+                children.get(parent).add(key);
+                key = parent;
+            }
+        }
+        function planForward(sourceKey) {
+            const [sx, sy] = sourceKey.split(',').map(Number);
+            for (const child of children.get(sourceKey) ?? []) {
+                let target = child;
+                let fused = false;
+                const next = children.get(child);
+                if (!required.has(child) && next?.size === 1) {
+                    const candidate = next.values().next().value;
+                    const [tx, ty] = candidate.split(',').map(Number);
+                    // Fuse only exact halves along the same axes. Choosing these
+                    // pairs from the source removes the largest intermediates first.
+                    fused = (tx - sx === 0 || tx - sx === 2)
+                        && (ty - sy === 0 || ty - sy === 2)
+                        && Math.ceil(input.width / 2 ** sx)
+                            === Math.ceil(input.width / 2 ** tx) * 2 ** (tx - sx)
+                        && Math.ceil(input.height / 2 ** sy)
+                            === Math.ceil(input.height / 2 ** ty) * 2 ** (ty - sy);
+                    if (fused) target = candidate;
+                }
+                reductionPlan.set(target, { sourceKey, fused });
+                planForward(target);
+            }
+        }
+        planForward('0,0');
+    }
     const levels = new Map();
     levels.set('0,0', { texture: input, width: input.width, height: input.height,
         padX: 0, padY: 0, vx: 0, vy: 0 });
@@ -317,16 +411,19 @@ function blurSmolGaussian(encoder, input, output) {
         // expensive large-image prefix instead of starting shifted pyramids.
         // This route depends only on the endpoint, not the blend weights: odd
         // dimensions must follow the same resampling path across transitions.
-        const prev = lx > ly ? down(lx - 1, ly)
-            : ly > lx ? down(lx, ly - 1) : down(lx - 1, ly - 1);
-        const src = prev.texture;
+        const { sourceKey, fused } = blur_params.disable_smol_4x_reduction
+            ? { sourceKey: predecessor(lx, ly).join(','), fused: false }
+            : reductionPlan.get(key);
+        const [px, py] = sourceKey.split(',').map(Number);
         const width = Math.ceil(input.width / 2 ** lx);
         const height = Math.ceil(input.height / 2 ** ly);
+        const prev = down(px, py);
+        const src = prev.texture;
         // Only reduced axes need padding; zero-radius axes keep exact texels.
         const padX = lx > 0 ? 1 : 0;
         const padY = ly > 0 ? 1 : 0;
         const texture = getCachedTexture(width + 2 * padX, height + 2 * padY);
-        smolPass(encoder, pip_smol_down, src, texture,
+        smolPass(encoder, fused ? pip_smol_down4 : pip_smol_down, src, texture,
             new Float32Array([prev.width, prev.height, prev.padX, prev.padY,
                 width, height, padX, padY]));
         // Box reduction variance in original texels; approximate for odd sizes.
@@ -369,8 +466,6 @@ function blurSmolGaussian(encoder, input, output) {
             { texture: a.texture }, { texture: output }, [output.width, output.height]);
         return;
     }
-    const middleWeight = Math.abs(x.blend - y.blend);
-    const diagonalWeight = Math.min(x.blend, y.blend);
     // Split the blend square along (0,0)--(1,1). On that diagonal only
     // matching-resolution endpoints contribute; elsewhere use one neighbor.
     // For fractions tx,ty the weights are 1-max(tx,ty), abs(tx-ty), min(tx,ty).
@@ -378,8 +473,7 @@ function blurSmolGaussian(encoder, input, output) {
     // interpolation this saves one endpoint, with a possible slope change at
     // the diagonal; shared edge weights keep the result continuous.
     const b = middleWeight > 0
-        ? endpoint(x.level + (x.blend > y.blend ? 1 : 0),
-                   y.level + (y.blend > x.blend ? 1 : 0)) : a;
+        ? endpoint(neighborX, neighborY) : a;
     const c = diagonalWeight > 0 ? endpoint(x.level + 1, y.level + 1) : a;
     // Inactive neighbors alias a. Check every sampled endpoint, including
     // coarser neighbors during transitions, before choosing the simple shader.

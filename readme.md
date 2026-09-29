@@ -15,6 +15,7 @@ Blur shaders, pipelines, and algorithm helpers live in `js/`:
 
 - `separable-blur.js`: Box, Tent, and Gaussian; Fast Gaussian also uses this for small radii.
 - `smol-gaussian.js`: Smol Gaussian.
+- `ryg-blur.js`: repeated fractional box filters evaluated with moving sums.
 - `dual-kawase.js`: Dual Kawase.
 - `fast-gaussian.js` and `skia-gaussian.js`: Fast and Skia Gaussian.
 - `gpu-helpers.js`: shared fullscreen vertex shader, GPU resource helpers, and texture cache.
@@ -34,6 +35,9 @@ Fast Gaussian compute pipelines are created on first use.
 - **Fast Gaussian** - Blender compositor's recursive Gaussian blur: direct convolution
   for small radii, Deriche for medium radii, and parallel second-order Van Vliet
   sections for large radii. See details below.
+- **Ryg Blur** - repeated fractional box filters using moving sums, based on
+  Fabian Giesen’s “Fast blurs” posts. Adjustable 1–5 boxes per axis (default 3);
+  see the GPU implementation and precision tradeoffs below.
 - **Smol Gaussian** - a Gaussian approximation using downsampling, small separable
   filters, and reconstruction, with smooth transitions between working resolutions.
 - **Skia Gaussian** - Skia’s GPU image-filter approach: progressive bilinear
@@ -70,6 +74,26 @@ Deriche/Van Vliet switch; browser/GPU compiler choices also affect rounding.
 The filter retains Blender's approximations, including possible small negative
 lobes and changes at algorithm thresholds.
 
+### Ryg Blur
+
+Based on Fabian Giesen’s [Fast blurs 1](https://fgiesen.wordpress.com/2012/07/30/fast-blurs-1/)
+and [Fast blurs 2](https://fgiesen.wordpress.com/2012/08/01/fast-blurs-2/).
+`js/ryg-blur.js` uses a compute invocation per scanline with a moving sum,
+using two hardware-filtered samples per update for fractional box endpoints.
+This trades interpolation precision for fewer sampling instructions: sampler
+subtexel weight precision can cause recurrence errors, especially at small radii.
+Initialization uses exact texture loads. Boundaries
+clamp to the edge; sums and intermediate textures use 32-bit floats.
+
+**Iteratons (ryg)** under **Blur Options** selects 1–5 boxes per axis (default 3), enabled only
+for this method. Each box’s exact discrete variance is matched to
+`(radius / 3)² / count`, so increasing count changes the approximation’s shape
+while preserving its variance. Zero-radius axes are skipped. The benchmark
+uses the selected count, records it in SVG metadata, and plots Ryg in teal
+before Smol Gaussian. Its scanline dependencies limit GPU parallelism, so
+performance should be judged using the benchmark rather than assumed from
+its low sample count. Initialization still costs O(box radius) per scanline.
+
 ### Smol Gaussian
 
 Radius maps approximately to three Gaussian standard deviations, like the existing
@@ -96,6 +120,26 @@ For example, an 8×5 logical level occupies a 10×7 texture when both axes reduc
 This adds border pixels and coordinate calculations, but no additional render
 passes; exact 2× reductions still use one bilinear sample per output pixel.
 
+Eligible pairs of exact 2× reductions are fused into one 4× reduction per
+reduced axis. Four bilinear reads cover a 4×4 footprint, or two cover a 4×1
+footprint for a single-axis reduction. The planner works from the source forward
+to eliminate the largest intermediates first. It keeps levels needed by active
+blur endpoints or shared branches, and requires each reduced source dimension
+to be exactly divisible by four; odd-size steps keep the original area filter.
+The preserved borders, working-resolution choices, and variance calculation stay
+the same. The fused filter matches two exact halves apart from filtering and
+intermediate rounding.
+
+For example, at radius X=Y=1000, 1920×1080 starts with
+`1920×1080 → 480×270 → 240×135`, skipping the 960×540 intermediate.
+At radius X=Y=500, 3840×2160 starts with two fused steps:
+`3840×2160 → 960×540 → 240×135`. These are logical sizes, excluding padding.
+Each fusion removes one render pass and its intermediate write/read; actual
+speedup depends on the GPU and the rest of the blur. **No 4x reduction (smol)**
+is unchecked by default; checking it bypasses fusion planning and restores only
+2× reduction steps. The benchmark respects this option, while enabling level
+blending, so it can be used to compare the two reduction paths.
+
 Reconstruction chooses per axis: bilinear for enlargement up to 2× (including
 odd-sized half-resolution images), positive cubic B-spline for coarser levels.
 This needs one bilinear sample when both axes use bilinear, two when only one
@@ -118,7 +162,7 @@ of the **same target blur**. The blending range is **sigma 5–6 in the current
 level's texels**, before variance compensation: `sigma = radius / 3`, divided by
 the actual reduction scale for that axis. Blending starts at 5 and the axis
 switches to the next level at 6; below 5, neighboring endpoints are skipped.
-The **Disable blending between levels** checkbox skips the crossfade entirely.
+The **No level blend (smol)** checkbox skips the crossfade entirely.
 Transitions use triangular interpolation: at most three small Gaussian results,
 and only two when the X/Y transition fractions match. A canonical reduction tree
 reduces both axes together first, then any remaining axis, so neighboring endpoints
@@ -225,6 +269,10 @@ same grids and sampling path for the shared suffix, including on odd-sized image
 
 ### Performance
 
+Benchmark checkboxes select which methods to measure (all selected by default).
+Deselected methods are skipped; remaining methods retain their chart colors and
+Smol Gaussian remains last. Select at least one method before starting.
+
 **Benchmark** measures Gaussian, Fast Gaussian, Dual Kawase, Skia Gaussian, Ryg Blur, and Smol Gaussian
 on the loaded image with equal X/Y radii, from 5 to 1000 at approximately 1.2×
 spacing. After a warm-up sweep, it runs four sweeps and plots the minimum
@@ -280,27 +328,3 @@ all on Chrome browser:
   which itself is adapted from [tinyexr](https://github.com/syoyo/tinyexr).
 - `js/fflate.js` is gzip/deflate decoder needed for EXR loading,
   from [fflate](https://101arrowz.github.io/fflate/).
-
-### Ryg Blur
-
-Based on Fabian Giesen’s [Fast blurs 1](https://fgiesen.wordpress.com/2012/07/30/fast-blurs-1/)
-and [Fast blurs 2](https://fgiesen.wordpress.com/2012/08/01/fast-blurs-2/).
-`js/ryg-blur.js` uses a compute invocation per scanline with a moving sum,
-using two hardware-filtered samples per update for fractional box endpoints.
-This trades interpolation precision for fewer sampling instructions: sampler
-subtexel weight precision can cause recurrence errors, especially at small radii.
-Initialization uses exact texture loads. Boundaries
-clamp to the edge; sums and intermediate textures use 32-bit floats.
-
-**Iteratons (ryg)** under **Blur Options** selects 1–5 boxes per axis (default 3), enabled only
-for this method. Each box’s exact discrete variance is matched to
-`(radius / 3)² / count`, so increasing count changes the approximation’s shape
-while preserving its variance. Zero-radius axes are skipped. The benchmark
-uses the selected count, records it in SVG metadata, and plots Ryg in teal
-before Smol Gaussian. Its scanline dependencies limit GPU parallelism, so
-performance should be judged using the benchmark rather than assumed from
-its low sample count. Initialization still costs O(box radius) per scanline.
-
-Benchmark checkboxes select which methods to measure (all selected by default).
-Deselected methods are skipped; remaining methods retain their chart colors and
-Smol Gaussian remains last. Select at least one method before starting.
