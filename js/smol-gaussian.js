@@ -336,7 +336,7 @@ function blurSmolGaussian(encoder, input, output) {
     for (let i = 1; i < path.length; ++i) {
         const [sx, sy] = path[i - 1];
         const candidate = path[i + 1];
-        const fused = !blur_params.disable_smol_4x_reduction && candidate
+        const fused = candidate
             && (candidate[0] - sx === 0 || candidate[0] - sx === 2)
             && (candidate[1] - sy === 0 || candidate[1] - sy === 2)
             && entry.width === Math.ceil(input.width / 2 ** candidate[0]) * 2 ** (candidate[0] - sx)

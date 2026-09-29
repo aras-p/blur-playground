@@ -85,7 +85,7 @@ subtexel weight precision can cause recurrence errors, especially at small radii
 Initialization uses exact texture loads. Boundaries
 clamp to the edge; sums and intermediate textures use 32-bit floats.
 
-**Iteratons (ryg)** under **Blur Options** selects 1–5 boxes per axis (default 3), enabled only
+**Iteratons (ryg)** under **Blur Mode** selects 1–5 boxes per axis (default 3), enabled only
 for this method. Each box’s exact discrete variance is matched to
 `(radius / 3)² / count`, so increasing count changes the approximation’s shape
 while preserving its variance. Zero-radius axes are skipped. The benchmark
@@ -123,29 +123,35 @@ passes; exact 2× reductions still use one bilinear sample per output pixel.
 Eligible pairs of exact 2× reductions are fused into one 4× reduction per
 reduced axis. Four bilinear reads cover a 4×4 footprint, or two cover a 4×1
 footprint for a single-axis reduction. The planner works from the source forward
-to eliminate the largest intermediates first. It follows a single reduction path and requires each reduced source dimension
-to be exactly divisible by four; odd-size steps keep the original area filter.
-The preserved borders, working-resolution choices, and variance calculation stay
-the same. The fused filter matches two exact halves apart from filtering and
-intermediate rounding.
+to eliminate the largest intermediates first. It follows a single reduction path
+and requires each reduced source dimension to be exactly divisible by four;
+odd-size steps keep the original area filter. The preserved borders,
+working-resolution choices, and variance calculation stay the same. The fused
+filter matches two exact halves apart from filtering and intermediate rounding.
 
 For example, at radius X=Y=1000, 1920×1080 starts with
 `1920×1080 → 480×270 → 240×135`, skipping the 960×540 intermediate.
 At radius X=Y=500, 3840×2160 starts with two fused steps:
 `3840×2160 → 960×540 → 240×135`. These are logical sizes, excluding padding.
 Each fusion removes one render pass and its intermediate write/read; actual
-speedup depends on the GPU and the rest of the blur. **No 4x reduction (smol)**
-is unchecked by default; checking it bypasses fusion planning and restores only
-2× reduction steps. The benchmark respects this option to compare the two reduction paths.
+speedup depends on the GPU and the rest of the blur.
+
+Measurements showed substantial gains from 4× reduction on RTX 3080 Ti and Intel
+Xe, and no noticeable benefit or regression on M4 Max. The difference might also
+involve Chrome’s Windows versus macOS GPU backends; these measurements do not
+isolate hardware from platform effects. Eligible 4× reductions are now always
+enabled, and the comparison checkbox has been removed.
 
 Reconstruction chooses per axis: bilinear for enlargement up to 2× (including
 odd-sized half-resolution images), positive cubic B-spline for coarser levels.
 This needs one bilinear sample when both axes use bilinear, two when only one
-needs cubic, and four when both do. Cubic removes coarse-grid slope discontinuities
-without ringing around HDR highlights. Variance compensation follows the chosen
-filter; unreduced axes preserve sharp detail. Filter choice depends on the working image dimensions.
-An `ALL_BILINEAR` WebGPU pipeline constant specializes reconstruction when the working image uses bilinear on both axes; other draws use the general
-hybrid shader. Both variants are created during initialization.
+needs cubic, and four when both do. Cubic removes coarse-grid slope
+discontinuities without ringing around HDR highlights. Variance compensation
+follows the chosen filter; unreduced axes preserve sharp detail. Filter choice
+depends on the working image dimensions. An `ALL_BILINEAR` WebGPU pipeline
+constant specializes reconstruction when the working image uses bilinear on both
+axes; other draws use the general hybrid shader. Both variants are created
+during initialization.
 
 Gaussian samples are paired using bilinear filtering, with at most 25 texture
 reads per pixel per axis. Textures and uniform buffers are reused. A single reduction
@@ -279,14 +285,14 @@ Benchmark checkboxes select which methods to measure (all selected by default).
 Deselected methods are skipped; remaining methods retain their chart colors and
 Smol Gaussian remains last. Select at least one method before starting.
 
-**Benchmark** measures Gaussian, Fast Gaussian, Dual Kawase, Skia Gaussian, Ryg Blur, and Smol Gaussian
-on the loaded image with equal X/Y radii, from 5 to 1000 at approximately 1.4×
-spacing. After a warm-up sweep, it runs four sweeps and plots the minimum
-batch-average milliseconds per frame at each radius. Each batch waits for the
-WebGPU queue before and after timing; CPU command preparation, GPU execution,
-and GPU idle time are included. Display, UI updates, and video encoding are excluded.
-Batches target 30 ms using the
-warm-up estimate, with 1–128 renders per batch.
+**Benchmark** measures Gaussian, Fast Gaussian, Dual Kawase, Skia Gaussian, Ryg
+Blur, and Smol Gaussian on the loaded image with equal X/Y radii, from 5 to 1000
+at approximately 1.4× spacing. After a warm-up sweep, it runs four sweeps and
+plots the minimum batch-average milliseconds per frame at each radius. Each
+batch waits for the WebGPU queue before and after timing; CPU command
+preparation, GPU execution, and GPU idle time are included. Display, UI updates,
+and video encoding are excluded. Batches target 30 ms using the warm-up
+estimate, with 1–128 renders per batch.
 
 The SVG is displayed directly below the image, with a Download SVG link. It has
 logarithmic axes and two-decimal timing labels. Progress updates at most every
