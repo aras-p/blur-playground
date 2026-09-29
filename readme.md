@@ -96,6 +96,29 @@ its low sample count. Initialization still costs O(box radius) per scanline.
 
 ### Smol Gaussian
 
+The comparison here is with this playground’s adaptation of Skia’s GPU blur
+path, not every blur implementation in Skia. Both use
+downsample–Gaussian–upsample, independent X/Y scales, preserved clamp-edge
+borders, and bilinear-paired Gaussian taps. Those are shared techniques, not
+Smol additions.
+
+| Choice | Skia adaptation here | Smol Gaussian now |
+| --- | --- | --- |
+| Working resolution | Halving steps plus a fractional final scale; sigma at most 4 | Ceil-halved levels; advance at working sigma 6 |
+| Reduction filter | Bilinear resampling | Pixel-area integration for odd sizes; eligible exact halves fused into 4× reductions |
+| Gaussian width | Requested sigma scaled to working resolution | Subtract estimated reduction and reconstruction variance first |
+| Gaussian support | Truncate at 3 sigma; small 2D kernels can use one pass | Always separable; taper from 3 to 4 sigma, capped at 25 reads per axis |
+| Reconstruction | Bilinear | Bilinear up to 2× enlargement per axis, cubic B-spline beyond |
+| Level crossfade | None | None; tried and removed |
+
+Smol’s main quality-oriented additions are area reduction, approximate variance
+compensation, and cubic reconstruction. Tap tapering softens changes when
+Gaussian support grows. The level policy is a different quality/cost choice,
+while 4× fusion is a performance optimization. These are established building
+blocks assembled differently, not a fundamentally new blur family or proof that
+Smol is universally better.
+
+
 Radius maps approximately to three Gaussian standard deviations, like the existing
 Gaussian mode. Each axis reduces independently to keep the working sigma small;
 a zero-radius axis keeps its original resolution and is not filtered. Exact 2×
@@ -209,7 +232,7 @@ Related work for the building blocks:
   cubic B-spline reconstruction using paired hardware-linear samples.
 - Bjørge, [Bandwidth-Efficient Rendering, SIGGRAPH 2015](https://community.arm.com/cfs-file/__key/communityserver-blogs-components-weblogfiles/00-00-00-20-66/siggraph2015_2D00_mmg_2D00_marius_2D00_notes.pdf):
   filtering across multiple resolutions. Its mixed-resolution pipeline is distinct
-  from crossfading alternative grids for the same target blur here.
+  from the same-target crossfade experiment recorded above.
 
 These sources explain individual techniques, not the exact Smol Gaussian
 combination implemented in this playground.
@@ -232,7 +255,8 @@ The relevant source is [SkImageFilterTypes.cpp](https://github.com/google/skia/b
 - The normalized Gaussian has radius ceil(3 × sigma). Small 2D kernels (up to
   28 samples) use one pass; others use separable, bilinear-paired 1D taps.
 - A single bilinear upscale reconstructs the result. There is no variance
-  compensation, cubic reconstruction, tap taper, or transition crossfade.
+  compensation, cubic reconstruction, or tap taper. Neither current method
+  crossfades levels.
   This deliberately retains Skia's radius-dependent approximation changes.
 
 Only whole-image blur with clamped edges is implemented. The existing HDR
