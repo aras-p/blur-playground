@@ -1,20 +1,12 @@
 /* Smol Gaussian: a Gaussian approximation using downsampling, small separable
- * filters, and reconstruction, with smooth transitions between working resolutions.
+ * filters, and reconstruction, with independently selected working resolutions.
  * Each axis chooses its working resolution independently.
- * Reduction and reconstruction already add blur, so each endpoint subtracts
+ * Reduction and reconstruction already add blur, so the working filter subtracts
  * their approximate variances before choosing its residual Gaussian sigma.
  *
- * A resolution change would otherwise change the approximation abruptly. Blend
- * neighboring grids, each computed for the SAME requested radius, before
- * retiring the finer grid. The canonical reduction tree shares work and keeps
- * each endpoint's sampling history independent of its current blend weight.
- * Reconstruction samples each endpoint directly onto the final output grid.
- *
- * Unlike Dual Kawase, these endpoints are alternative approximations of one
- * target blur, not fixed kernels of different widths. Area reduction, Gaussian
- * filtering, and bilinear/cubic reconstruction are established building blocks;
- * the variance estimates, 5–6 sigma transition, tapered tails, and triangular
- * blending are choices of this approximation, not an exact Gaussian identity.
+ * One working resolution per axis is filtered, then reconstructed directly
+ * onto the final output grid. Level crossfading was tried and removed; see
+ * readme.md for the experiment and reconstruction details.
  *
  * Related work (building blocks, not a specification of this exact combination):
  * - Fabian Giesen, "Gaussian blur kernels" (2009): prefilter before reducing,
@@ -38,8 +30,8 @@
 let pip_smol_gaussian = null;
 let pip_smol_down = null;
 let pip_smol_down4 = null;
-let pip_smol_mix = null;
-let pip_smol_mix_bilinear = null;
+let pip_smol_reconstruct = null;
+let pip_smol_reconstruct_bilinear = null;
 const smolUniformBuffers = [];
 let smolUniformBufferIndex = 0;
 
@@ -49,8 +41,8 @@ function initSmolGaussian() {
     pip_smol_down4 = createPipeline(SMOL_DOWNSAMPLE4_SHADER);
     // Two specializations of one reconstruction shader, not two blur algorithms.
     // The general variant can still use bilinear on either axis independently.
-    pip_smol_mix = createPipeline(SMOL_MIX_SHADER);
-    pip_smol_mix_bilinear = createPipeline(SMOL_MIX_SHADER, undefined, false,
+    pip_smol_reconstruct = createPipeline(SMOL_RECONSTRUCT_SHADER);
+    pip_smol_reconstruct_bilinear = createPipeline(SMOL_RECONSTRUCT_SHADER, undefined, false,
         { ALL_BILINEAR: true });
 }
 
@@ -182,18 +174,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 }
 `;
 
-// Reconstruct and blend all RGBA channels, without using alpha as a weight.
-const SMOL_MIX_SHADER = FULLSCREEN_VERTEX_SHADER + `
+// Reconstruct all RGBA channels from one working image.
+const SMOL_RECONSTRUCT_SHADER = FULLSCREEN_VERTEX_SHADER + `
 override ALL_BILINEAR: bool = false;
 struct Params {
-    ratio: vec2f, outputSize: vec2f,
-    base: vec4f, neighbor: vec4f, diagonal: vec4f,
+    outputSize: vec2f, padding: vec2f,
+    base: vec4f,
 }
 @group(0) @binding(0) var smp: sampler;
 @group(0) @binding(1) var tex: texture_2d<f32>;
 @group(0) @binding(2) var<uniform> params: Params;
-@group(0) @binding(3) var texX: texture_2d<f32>;
-@group(0) @binding(4) var texY: texture_2d<f32>;
 // Bilinear through 2× enlargement on each axis; positive cubic B-spline
 // beyond that to avoid coarse-grid facets without ringing. This uses one,
 // two, or four bilinear samples depending on how many axes need cubic.
@@ -244,21 +234,13 @@ fn reconstruct(image: texture_2d<f32>, uv: vec2f, imageBounds: vec4f) -> vec4f {
 }
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    // Triangle weights: base, dominant-axis neighbor, diagonal neighbor.
-    var color = reconstruct(tex, in.uv, params.base) * (1.0 - params.ratio.x - params.ratio.y);
-    if (params.ratio.x > 0.0) {
-        color += reconstruct(texX, in.uv, params.neighbor) * params.ratio.x;
-    }
-    if (params.ratio.y > 0.0) {
-        color += reconstruct(texY, in.uv, params.diagonal) * params.ratio.y;
-    }
-    return color;
+    return reconstruct(tex, in.uv, params.base);
 }
 `;
 
 // ================ Smol Gaussian blur
 
-function smolPass(encoder, pipeline, input, output, data, other = null) {
+function smolPass(encoder, pipeline, input, output, data) {
     const index = smolUniformBufferIndex++;
     if (!smolUniformBuffers[index]) {
         smolUniformBuffers[index] = gpu_device.createBuffer({
@@ -272,7 +254,6 @@ function smolPass(encoder, pipeline, input, output, data, other = null) {
         { binding: 2, resource: { buffer } },
     ];
     entries.push({ binding: 0, resource: gpu_sampler_linear });
-    if (other) other.forEach((tex, i) => entries.push({ binding: 3 + i, resource: tex.createView() }));
     const pass = encoder.beginRenderPass({colorAttachments: [{
         view: output.createView(), loadOp: 'clear', storeOp: 'store',
         clearValue: { r: 0, g: 0, b: 0, a: 0 },
@@ -290,13 +271,11 @@ function smolAxisPlan(radius, size) {
     let level = 0;
     // Ceil-sized levels support odd dimensions and stop at a single texel.
     // Use the actual size ratio, not 2**level: e.g. 5 -> 3 is a 5/3 reduction.
-    // At working sigma 5 start the crossfade, and at 6 advance the base level.
-    // Both endpoints still use the original target sigma in endpoint().
+    // Advance the working level at sigma 6; filtering retains the target sigma.
     const maxLevel = Math.ceil(Math.log2(size));
     const scale = level => size / Math.ceil(size / 2 ** level);
     while (level < maxLevel && sigma >= 6 * scale(level)) level++;
-    const t = Math.min(1, Math.max(0, sigma / scale(level) - 5));
-    return { sigma, level, blend: level < maxLevel ? t * t * (3 - 2 * t) : 0 };
+    return { sigma, level };
 }
 
 function smolGaussianAxis(encoder, input, sigma, horizontal, destination = null) {
@@ -345,79 +324,28 @@ function reconstructionVariance(scale) {
 function blurSmolGaussian(encoder, input, output) {
     const x = smolAxisPlan(blur_params.radius_x, input.width);
     const y = smolAxisPlan(blur_params.radius_y, input.height);
-    // Keep the selected levels, but skip neighboring endpoints and switch
-    // levels abruptly at the existing reduction thresholds.
-    if (blur_params.disable_smol_blending) x.blend = y.blend = 0;
-    const middleWeight = Math.abs(x.blend - y.blend);
-    const diagonalWeight = Math.min(x.blend, y.blend);
-    const neighborX = x.level + (x.blend > y.blend ? 1 : 0);
-    const neighborY = y.level + (y.blend > x.blend ? 1 : 0);
-    // Know every active endpoint before building the tree: fusion must not
-    // skip a level that another endpoint needs.
-    const required = new Set([`${x.level},${y.level}`]);
-    if (middleWeight > 0) required.add(`${neighborX},${neighborY}`);
-    if (diagonalWeight > 0) required.add(`${x.level + 1},${y.level + 1}`);
-    const predecessor = (lx, ly) => lx > ly ? [lx - 1, ly]
-        : ly > lx ? [lx, ly - 1] : [lx - 1, ly - 1];
-    const reductionPlan = new Map();
-    if (!blur_params.disable_smol_4x_reduction) {
-        // Build the union of endpoint paths before choosing fusions. Branch points
-        // must remain available so all endpoints share the same reduction prefix.
-        const children = new Map();
-        for (const endpoint of required) {
-            let key = endpoint;
-            while (key !== '0,0') {
-                const [lx, ly] = key.split(',').map(Number);
-                const parent = predecessor(lx, ly).join(',');
-                if (!children.has(parent)) children.set(parent, new Set());
-                children.get(parent).add(key);
-                key = parent;
-            }
-        }
-        function planForward(sourceKey) {
-            const [sx, sy] = sourceKey.split(',').map(Number);
-            for (const child of children.get(sourceKey) ?? []) {
-                let target = child;
-                let fused = false;
-                const next = children.get(child);
-                if (!required.has(child) && next?.size === 1) {
-                    const candidate = next.values().next().value;
-                    const [tx, ty] = candidate.split(',').map(Number);
-                    // Fuse only exact halves along the same axes. Choosing these
-                    // pairs from the source removes the largest intermediates first.
-                    fused = (tx - sx === 0 || tx - sx === 2)
-                        && (ty - sy === 0 || ty - sy === 2)
-                        && Math.ceil(input.width / 2 ** sx)
-                            === Math.ceil(input.width / 2 ** tx) * 2 ** (tx - sx)
-                        && Math.ceil(input.height / 2 ** sy)
-                            === Math.ceil(input.height / 2 ** ty) * 2 ** (ty - sy);
-                    if (fused) target = candidate;
-                }
-                reductionPlan.set(target, { sourceKey, fused });
-                planForward(target);
-            }
-        }
-        planForward('0,0');
+    // Build one path: reduce both axes together, then the remaining axis.
+    const path = [[0, 0]];
+    for (let lx = 0, ly = 0; lx < x.level || ly < y.level;) {
+        lx += lx < x.level ? 1 : 0;
+        ly += ly < y.level ? 1 : 0;
+        path.push([lx, ly]);
     }
-    const levels = new Map();
-    levels.set('0,0', { texture: input, width: input.width, height: input.height,
-        padX: 0, padY: 0, vx: 0, vy: 0 });
-    // Share a canonical reduction tree between at most three endpoints.
-    function down(lx, ly) {
-        const key = `${lx},${ly}`;
-        if (levels.has(key)) return levels.get(key);
-        // First reduce both axes together to their common level, then the
-        // remaining axis. Neighboring rectangular endpoints thus reuse the
-        // expensive large-image prefix instead of starting shifted pyramids.
-        // This route depends only on the endpoint, not the blend weights: odd
-        // dimensions must follow the same resampling path across transitions.
-        const { sourceKey, fused } = blur_params.disable_smol_4x_reduction
-            ? { sourceKey: predecessor(lx, ly).join(','), fused: false }
-            : reductionPlan.get(key);
-        const [px, py] = sourceKey.split(',').map(Number);
+    let entry = { texture: input, width: input.width, height: input.height,
+        padX: 0, padY: 0, vx: 0, vy: 0 };
+    for (let i = 1; i < path.length; ++i) {
+        const [sx, sy] = path[i - 1];
+        const candidate = path[i + 1];
+        const fused = !blur_params.disable_smol_4x_reduction && candidate
+            && (candidate[0] - sx === 0 || candidate[0] - sx === 2)
+            && (candidate[1] - sy === 0 || candidate[1] - sy === 2)
+            && entry.width === Math.ceil(input.width / 2 ** candidate[0]) * 2 ** (candidate[0] - sx)
+            && entry.height === Math.ceil(input.height / 2 ** candidate[1]) * 2 ** (candidate[1] - sy);
+        if (fused) ++i;
+        const [lx, ly] = path[i];
         const width = Math.ceil(input.width / 2 ** lx);
         const height = Math.ceil(input.height / 2 ** ly);
-        const prev = down(px, py);
+        const prev = entry;
         const src = prev.texture;
         // Only reduced axes need padding; zero-radius axes keep exact texels.
         const padX = lx > 0 ? 1 : 0;
@@ -427,61 +355,36 @@ function blurSmolGaussian(encoder, input, output) {
             new Float32Array([prev.width, prev.height, prev.padX, prev.padY,
                 width, height, padX, padY]));
         // Box reduction variance in original texels; approximate for odd sizes.
-        const entry = { texture, width, height, padX, padY,
+        entry = { texture, width, height, padX, padY,
             vx: ((input.width / width) ** 2 - 1) / 12,
             vy: ((input.height / height) ** 2 - 1) / 12,
         };
-        levels.set(key, entry);
         intermediateTextures.push({ texture, name: `Reduced ${width}×${height}` });
-        return entry;
     }
-    function endpoint(lx, ly, destination = null) {
-        const entry = down(lx, ly);
-        const sx = input.width / entry.width;
-        const sy = input.height / entry.height;
-        // Variances add under convolution. In original-image pixel units:
-        // targetSigma^2 ~= reductionVariance + (scale * residualSigma)^2
-        //                  + reconstructionVariance.
-        // Solve per axis, clamp at zero, then convert sigma to reduced texels.
-        // Resampling is phase-dependent, so this is a width estimate rather
-        // than an exact description of the resulting kernel or its borders.
-        const sigmaX = Math.sqrt(Math.max(0, x.sigma ** 2 - entry.vx - reconstructionVariance(sx))) / sx;
-        const sigmaY = Math.sqrt(Math.max(0, y.sigma ** 2 - entry.vy - reconstructionVariance(sy))) / sy;
-        const filterY = sigmaY >= 0.01 && entry.texture.height > 1;
-        let tex = smolGaussianAxis(encoder, entry.texture, sigmaX, true,
-            filterY ? null : destination);
-        tex = smolGaussianAxis(encoder, tex, sigmaY, false, destination);
-        intermediateTextures.push({ texture: tex, name: `Gaussian ${tex.width}×${tex.height}` });
-        return { ...entry, texture: tex };
-    }
-    // Reconstruct each endpoint directly on the output grid. An intermediate
-    // resize here would add blur that disappears at the level boundary.
-    // With no resizing or blending, write the final Gaussian axis directly
-    // to the output instead of running a full-resolution reconstruction pass.
-    const direct = x.level === 0 && y.level === 0 && x.blend === 0 && y.blend === 0;
-    const a = endpoint(x.level, y.level, direct ? output : null);
+    const direct = x.level === 0 && y.level === 0;
+    const destination = direct ? output : null;
+    const sx = input.width / entry.width;
+    const sy = input.height / entry.height;
+    // Variances add under convolution. In original-image pixel units:
+    // targetSigma^2 ~= reductionVariance + (scale * residualSigma)^2
+    //                  + reconstructionVariance.
+    // Solve per axis, clamp at zero, then convert sigma to reduced texels.
+    // Resampling is phase-dependent, so this is a width estimate rather
+    // than an exact description of the resulting kernel or its borders.
+    const sigmaX = Math.sqrt(Math.max(0, x.sigma ** 2 - entry.vx - reconstructionVariance(sx))) / sx;
+    const sigmaY = Math.sqrt(Math.max(0, y.sigma ** 2 - entry.vy - reconstructionVariance(sy))) / sy;
+    const filterY = sigmaY >= 0.01 && entry.texture.height > 1;
+    let tex = smolGaussianAxis(encoder, entry.texture, sigmaX, true,
+        filterY ? null : destination);
+    tex = smolGaussianAxis(encoder, tex, sigmaY, false, destination);
+    intermediateTextures.push({ texture: tex, name: `Gaussian ${tex.width}×${tex.height}` });
     if (direct) {
-        // Both axes can be bypassed for zero/tiny radii or one-pixel images.
-        if (a.texture !== output) encoder.copyTextureToTexture(
-            { texture: a.texture }, { texture: output }, [output.width, output.height]);
+        if (tex !== output) encoder.copyTextureToTexture(
+            { texture: tex }, { texture: output }, [output.width, output.height]);
         return;
     }
-    // Split the blend square along (0,0)--(1,1). On that diagonal only
-    // matching-resolution endpoints contribute; elsewhere use one neighbor.
-    // For fractions tx,ty the weights are 1-max(tx,ty), abs(tx-ty), min(tx,ty).
-    // They are nonnegative and sum to one. Compared with four-corner bilinear
-    // interpolation this saves one endpoint, with a possible slope change at
-    // the diagonal; shared edge weights keep the result continuous.
-    const b = middleWeight > 0
-        ? endpoint(neighborX, neighborY) : a;
-    const c = diagonalWeight > 0 ? endpoint(x.level + 1, y.level + 1) : a;
-    // Inactive neighbors alias a. Check every sampled endpoint, including
-    // coarser neighbors during transitions, before choosing the simple shader.
-    const allBilinear = [a, b, c].every(tex =>
-        2 * tex.width >= output.width && 2 * tex.height >= output.height);
-    const bounds = entry => [entry.width, entry.height, entry.padX, entry.padY];
-    smolPass(encoder, allBilinear ? pip_smol_mix_bilinear : pip_smol_mix, a.texture, output,
-        new Float32Array([middleWeight, diagonalWeight, output.width, output.height,
-            ...bounds(a), ...bounds(b), ...bounds(c)]), [b.texture, c.texture]);
+    const allBilinear = 2 * entry.width >= output.width && 2 * entry.height >= output.height;
+    smolPass(encoder, allBilinear ? pip_smol_reconstruct_bilinear : pip_smol_reconstruct, tex, output,
+        new Float32Array([output.width, output.height, 0, 0,
+            entry.width, entry.height, entry.padX, entry.padY]));
 }
-

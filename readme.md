@@ -39,7 +39,7 @@ Fast Gaussian compute pipelines are created on first use.
   Fabian Giesen’s “Fast blurs” posts. Adjustable 1–5 boxes per axis (default 3);
   see the GPU implementation and precision tradeoffs below.
 - **Smol Gaussian** - a Gaussian approximation using downsampling, small separable
-  filters, and reconstruction, with smooth transitions between working resolutions.
+  filters, and reconstruction, with independently selected working resolutions.
 - **Skia Gaussian** - Skia’s GPU image-filter approach: progressive bilinear
   downsampling, a small Gaussian, and bilinear reconstruction. Supports independent
   X/Y radii; see implementation details below.
@@ -123,8 +123,7 @@ passes; exact 2× reductions still use one bilinear sample per output pixel.
 Eligible pairs of exact 2× reductions are fused into one 4× reduction per
 reduced axis. Four bilinear reads cover a 4×4 footprint, or two cover a 4×1
 footprint for a single-axis reduction. The planner works from the source forward
-to eliminate the largest intermediates first. It keeps levels needed by active
-blur endpoints or shared branches, and requires each reduced source dimension
+to eliminate the largest intermediates first. It follows a single reduction path and requires each reduced source dimension
 to be exactly divisible by four; odd-size steps keep the original area filter.
 The preserved borders, working-resolution choices, and variance calculation stay
 the same. The fused filter matches two exact halves apart from filtering and
@@ -137,47 +136,54 @@ At radius X=Y=500, 3840×2160 starts with two fused steps:
 Each fusion removes one render pass and its intermediate write/read; actual
 speedup depends on the GPU and the rest of the blur. **No 4x reduction (smol)**
 is unchecked by default; checking it bypasses fusion planning and restores only
-2× reduction steps. The benchmark respects this option, while enabling level
-blending, so it can be used to compare the two reduction paths.
+2× reduction steps. The benchmark respects this option to compare the two reduction paths.
 
 Reconstruction chooses per axis: bilinear for enlargement up to 2× (including
 odd-sized half-resolution images), positive cubic B-spline for coarser levels.
 This needs one bilinear sample when both axes use bilinear, two when only one
 needs cubic, and four when both do. Cubic removes coarse-grid slope discontinuities
 without ringing around HDR highlights. Variance compensation follows the chosen
-filter; unreduced axes preserve sharp detail. Filter choice depends on endpoint
-dimensions, so the existing crossfade also blends changes in reconstruction.
-An `ALL_BILINEAR` WebGPU pipeline constant specializes reconstruction when all
-contributing endpoints use bilinear on both axes; other draws use the general
+filter; unreduced axes preserve sharp detail. Filter choice depends on the working image dimensions.
+An `ALL_BILINEAR` WebGPU pipeline constant specializes reconstruction when the working image uses bilinear on both axes; other draws use the general
 hybrid shader. Both variants are created during initialization.
 
 Gaussian samples are paired using bilinear filtering, with at most 25 texture
-reads per pixel per axis. Textures and uniform buffers are reused. Reduction
-prefixes are shared between transition paths, and reconstruction writes the
-full-resolution output once. When no resizing or blending is needed, the final
+reads per pixel per axis. Textures and uniform buffers are reused. A single reduction
+path reduces both axes together, then the remaining axis. Reconstruction writes the
+full-resolution output once. When no resizing is needed, the final
 Gaussian pass writes directly to the output and reconstruction is skipped.
 
-Before an axis changes resolution, a smoothstep crossfade blends two approximations
-of the **same target blur**. The blending range is **sigma 5–6 in the current
-level's texels**, before variance compensation: `sigma = radius / 3`, divided by
-the actual reduction scale for that axis. Blending starts at 5 and the axis
-switches to the next level at 6; below 5, neighboring endpoints are skipped.
-The **No level blend (smol)** checkbox skips the crossfade entirely.
-Transitions use triangular interpolation: at most three small Gaussian results,
-and only two when the X/Y transition fractions match. A canonical reduction tree
-reduces both axes together first, then any remaining axis, so neighboring endpoints
-share the expensive large-image downsample prefix. The fixed route also keeps
-odd-sized resampling consistent across transition boundaries. Each is reconstructed directly onto the output grid to avoid an extra
-resize appearing or disappearing at a boundary. Kernel tails taper smoothly as
-the tap count changes. This prioritizes smooth radius changes and a rounded blur
-shape over exact Gaussian matching; resampling still introduces some phase-dependent
-shape variation. Radius sliders use steps of 1.
+Each axis switches to the next working level at sigma 6 in that level's
+texels (`sigma = radius / 3`, divided by the actual reduction scale).
+There is one Gaussian result and one reconstruction, with no level blending.
+Kernel tails still taper smoothly as the tap count changes. Resampling remains
+an approximation with some phase-dependent shape variation.
 
-Area reduction, separable Gaussian filtering, and reconstruction are the building
-blocks. The variance estimates, transition thresholds, tapered tails, and choice
-of three endpoints define this particular approximation. Unlike Dual Kawase's
-blend between fixed blur widths, Smol Gaussian's endpoints all target the
-same requested width; their blend hides a change of working resolution.
+#### Tried idea: crossfading working resolutions
+
+We tried blending neighboring resolutions to hide level switches. In video
+comparisons, including a small image exported without downscaling, the benefit
+was barely visible, if at all. Extra runtime cost in transition regions and
+code complexity were not worth it, so this was removed along with its checkbox.
+This is an observation about our tested images, not a guarantee for every input.
+
+For anyone revisiting it: start a smoothstep fade at working sigma 5 and finish
+at 6, then retire the finer level. With exact halves this gives radius ranges
+15–18, 30–36, 60–72, etc.; use actual scale ratios for odd dimensions. Both
+resolutions target the **same requested sigma**, each with its own reduction
+and reconstruction variance compensation, unlike Dual Kawase's interpolation
+between different blur widths. Reconstruct each result directly to the output
+grid to avoid adding an intermediate resize that disappears at the boundary.
+For independent axis fractions `tx, ty`, triangular weights are
+`1-max(tx,ty)` for the base, `abs(tx-ty)` for the neighbor advancing the axis
+with the larger fraction, and `min(tx,ty)` for the neighbor advancing both.
+This needs up to three Gaussian results, or two for matching fractions.
+Share canonical reduction prefixes, reducing both axes together first; 4×
+fusion must preserve any intermediate needed by an endpoint or branch.
+Each result generally adds horizontal and vertical Gaussian passes, plus
+extra reconstruction samples and texture bindings. The current implementation
+keeps only one result, the original sigma-6 level selection, and eligible 4×
+fusions along its single path.
 
 Related work for the building blocks:
 
@@ -188,7 +194,7 @@ Related work for the building blocks:
   prefilters differ from our area integration.
 - Cornell CS5625, [Apply blur to mipmap levels (2022)](https://www.cs.cornell.edu/courses/cs5625/2022sp/assignments/pipeline.html#323-apply-blur-to-mipmap-levels):
   an explicit recipe to downsample by `2^k`, blur with sigma `sigma / 2^k`, and
-  upsample. This describes the basic structure of one endpoint before our
+  upsample. This describes the basic structure of the working image before our
   variance compensation. Its bloom merge combines different blur widths,
   rather than alternative resolutions of the same target width.
 - Intel, [An Investigation of Fast Real-Time GPU-Based Image Blur Algorithms](https://www.intel.com/content/www/us/en/developer/articles/technical/an-investigation-of-fast-real-time-gpu-based-image-blur-algorithms.html),
@@ -279,7 +285,7 @@ spacing. After a warm-up sweep, it runs four sweeps and plots the minimum
 batch-average milliseconds per frame at each radius. Each batch waits for the
 WebGPU queue before and after timing; CPU command preparation, GPU execution,
 and GPU idle time are included. Display, UI updates, and video encoding are excluded.
-Smol blending follows the “No level blend (smol)” checkbox; its setting is recorded in SVG metadata. Batches target 30 ms using the
+Batches target 30 ms using the
 warm-up estimate, with 1–128 renders per batch.
 
 The SVG is displayed directly below the image, with a Download SVG link. It has

@@ -219,10 +219,6 @@ body {
     <div class="control-group">
         <label>Blur Options</label>
         <div class="checkbox-row">
-            <input type="checkbox" id="disableSmolBlending">
-            <label for="disableSmolBlending">No level blend (smol)</label>
-        </div>
-        <div class="checkbox-row">
             <input type="checkbox" id="disableSmol4xReduction">
             <label for="disableSmol4xReduction">No 4x reduction (smol)</label>
         </div>
@@ -373,7 +369,6 @@ const BlurMode = {
 
 const blur_params = {
     mode: BlurMode.SMOL_GAUSSIAN,
-    disable_smol_blending: false,
     disable_smol_4x_reduction: false,
     ryg_box_count: 3,
     radius_x: 96,
@@ -845,13 +840,6 @@ function setupEventHandlers() {
     });
 
     // Blur mode radio buttons
-    const disableSmolBlending = document.getElementById('disableSmolBlending');
-    disableSmolBlending.disabled = blur_params.mode !== BlurMode.SMOL_GAUSSIAN;
-    disableSmolBlending.addEventListener('change', (e) => {
-        blur_params.disable_smol_blending = e.target.checked;
-        resetTextureSelection();
-        onBlurParamsChanged();
-    });
     const disableSmol4xReduction = document.getElementById('disableSmol4xReduction');
     disableSmol4xReduction.disabled = blur_params.mode !== BlurMode.SMOL_GAUSSIAN;
     disableSmol4xReduction.addEventListener('change', (e) => {
@@ -863,7 +851,6 @@ function setupEventHandlers() {
         radio.addEventListener('change', (e) => {
             blur_params.mode = e.target.value;
             rygBoxCount.disabled = blur_params.mode !== BlurMode.RYG;
-            disableSmolBlending.disabled = blur_params.mode !== BlurMode.SMOL_GAUSSIAN;
             disableSmol4xReduction.disabled = blur_params.mode !== BlurMode.SMOL_GAUSSIAN;
             // Reset texture selection to final output when blur mode changes
             resetTextureSelection();
@@ -962,7 +949,7 @@ function setupEventHandlers() {
                     { mode: BlurMode.DUAL_KAWASE, name: 'Dual Kawase', color: '#9554a0' },
                     { mode: BlurMode.SKIA_GAUSSIAN, name: 'Skia Gaussian', color: '#b77b22' },
                     { mode: BlurMode.RYG, name: 'Ryg Blur', color: '#168c91', boxCount: blur_params.ryg_box_count },
-                    { mode: BlurMode.SMOL_GAUSSIAN, name: 'Smol Gaussian', color: '#37834c', emphasized: true, disableLevelBlending: savedParams.disable_smol_blending },
+                    { mode: BlurMode.SMOL_GAUSSIAN, name: 'Smol Gaussian', color: '#37834c', emphasized: true },
                 ].filter(method => selectedModes.has(method.mode)),
                 setCase: (mode, radius) => {
                     Object.assign(blur_params, { mode, radius_x: radius, radius_y: radius, lock_radius: true });
