@@ -36,6 +36,7 @@ body {
     border-color: #888;
     background-color: #252525;
 }
+#canvas.dragover { outline: 2px solid #6af; outline-offset: 2px; }
 .dropzone input {
     display: none;
 }
@@ -527,9 +528,15 @@ let renderingVideo = false;
 let benchmarking = false;
 let loadingImage = false;
 let imageLoadId = 0;
+let benchmarkURL = null;
 
 async function handleImageFile(file) {
     if (renderingVideo || benchmarking || !gpu_device) return;
+    const benchmarkResult = document.getElementById('benchmarkResult');
+    benchmarkResult.hidden = true;
+    benchmarkResult.replaceChildren();
+    document.getElementById('benchmarkStatus').replaceChildren();
+    if (benchmarkURL) { URL.revokeObjectURL(benchmarkURL); benchmarkURL = null; }
     const loadId = ++imageLoadId;
     loadingImage = true;
     const statusEl = document.getElementById('status');
@@ -794,25 +801,24 @@ function setupEventHandlers() {
         }
     });
 
-    // Drag and drop
-    dropzone.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        dropzone.classList.add('dragover');
-    });
-
-    dropzone.addEventListener('dragleave', () => {
-        dropzone.classList.remove('dragover');
-    });
-
-    dropzone.addEventListener('drop', (e) => {
-        e.preventDefault();
-        dropzone.classList.remove('dragover');
-
-        const files = e.dataTransfer.files;
-        if (files.length > 0) {
-            handleImageFile(files[0]);
-        }
-    });
+    // Both entry points share the same loader and busy-state checks.
+    for (const target of [dropzone, document.getElementById('canvas')]) {
+        target.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            if (renderingVideo || benchmarking) {
+                e.dataTransfer.dropEffect = 'none';
+                return;
+            }
+            e.dataTransfer.dropEffect = 'copy';
+            target.classList.add('dragover');
+        });
+        target.addEventListener('dragleave', () => target.classList.remove('dragover'));
+        target.addEventListener('drop', (e) => {
+            e.preventDefault();
+            target.classList.remove('dragover');
+            if (e.dataTransfer.files.length > 0) handleImageFile(e.dataTransfer.files[0]);
+        });
+    }
 
     // Sample file links
     document.querySelectorAll('.sample-link').forEach(link => {
@@ -891,7 +897,6 @@ function setupEventHandlers() {
 
     const benchmarkButton = document.getElementById('benchmark');
     const benchmarkStatus = document.getElementById('benchmarkStatus');
-    let benchmarkURL = null;
     let cancelBenchmark = false;
     benchmarkButton.addEventListener('click', async () => {
         if (benchmarking) { cancelBenchmark = true; benchmarkButton.disabled = true; return; }
