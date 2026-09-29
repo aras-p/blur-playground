@@ -225,6 +225,26 @@ same grids and sampling path for the shared suffix, including on odd-sized image
 
 ### Performance
 
+**Benchmark** measures Gaussian, Fast Gaussian, Dual Kawase, Skia Gaussian, and Smol Gaussian
+on the loaded image with equal X/Y radii, from 5 to 1000 at approximately 1.2×
+spacing. After a warm-up sweep, it runs four sweeps and plots the minimum
+batch-average milliseconds per frame at each radius. Each batch waits for the
+WebGPU queue before and after timing; CPU command preparation, GPU execution,
+and GPU idle time are included. Display, UI updates, and video encoding are excluded.
+Smol blending is enabled for these comparisons. Batches target 30 ms using the
+warm-up estimate, with 1–128 renders per batch.
+
+The SVG is displayed directly below the image, with a Download SVG link. It has
+logarithmic axes and two-decimal timing labels. Progress updates at most every
+200 ms, outside the timed batches. Its
+Y axis starts at 0.05 ms, or lower when needed to show faster results. Raw samples
+and batch sizes are embedded in the SVG metadata. Cancel stops after the current
+batch; the original blur settings are restored. **Render Video** exports video
+without reporting a benchmark time.
+
+The historical measurements below used the previous video-export timer and are
+not directly comparable to the dedicated benchmark.
+
 **Render Video** time in seconds, doing an animated radius sweep on a 1920x1080 input image,
 all on Chrome browser:
 

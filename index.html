@@ -96,7 +96,7 @@ body {
 #textureList option.final-output {
     font-weight: bold;
 }
-#renderVideo, #timeNoopVideo {
+#renderVideo, #benchmark {
     margin-top: 5px;
     padding: 6px 10px;
     background: #383838;
@@ -105,9 +105,14 @@ body {
     color: #e0e0e0;
     cursor: pointer;
 }
-#renderVideo:disabled, #timeNoopVideo:disabled { opacity: 0.5; cursor: default; }
-#videoStatus { max-width: 290px; font-size: 12px; color: #bbb; }
-#videoStatus a { color: #acd1ff; }
+#renderVideo:disabled, #benchmark:disabled { opacity: 0.5; cursor: default; }
+#videoStatus, #benchmarkStatus { max-width: 290px; font-size: 12px; color: #bbb; }
+#videoStatus a, #benchmarkStatus a { color: #acd1ff; }
+.benchmark-controls { width: 290px; }
+#benchmarkStatus { min-height: 32px; }
+#benchmarkResult { max-width: 1100px; margin: 20px 0; }
+#benchmarkResult svg { display: block; width: 100%; height: auto; }
+#benchmarkResult a { display: inline-block; margin-top: 8px; color: #acd1ff; }
 #status {
     margin-top: 10px;
     color: #888;
@@ -235,8 +240,11 @@ body {
             <label for="animateRadius">Animate</label>
         </div>
         <button type="button" id="renderVideo">Render Video</button>
-        <button type="button" id="timeNoopVideo">Time no-op video</button>
         <div id="videoStatus" role="status" aria-live="polite"></div>
+    </div>
+    <div class="control-group benchmark-controls">
+        <button type="button" id="benchmark">Benchmark</button>
+        <div id="benchmarkStatus" role="status" aria-live="polite"></div>
     </div>
 
 </div>
@@ -249,6 +257,7 @@ body {
         </select>
     </div>
 </div>
+<div id="benchmarkResult" hidden></div>
 <div id="status">WebGPU initializing...</div>
 <div id="error"></div>
 
@@ -261,6 +270,7 @@ body {
 <script src="js/fast-gaussian.js"></script>
 <script src="js/skia-gaussian.js"></script>
 <script src="js/video-export.js"></script>
+<script src="js/benchmark.js"></script>
 <script>
 // ================ Shaders
 const DISPLAY_SHADER = FULLSCREEN_VERTEX_SHADER + `
@@ -493,11 +503,12 @@ async function loadEXR(file) {
 }
 
 let renderingVideo = false;
+let benchmarking = false;
 let loadingImage = false;
 let imageLoadId = 0;
 
 async function handleImageFile(file) {
-    if (renderingVideo || !gpu_device) return;
+    if (renderingVideo || benchmarking || !gpu_device) return;
     const loadId = ++imageLoadId;
     loadingImage = true;
     const statusEl = document.getElementById('status');
@@ -628,13 +639,13 @@ function getDisplayTexture(blurredOutput) {
 
 // ================ Rendering
 
-async function render(captureFrame = null, skipBlur = false) {
+async function render(captureFrame = null, blurOnly = false) {
     if (!gpu_device || !tex_source) return;
 
     const { width, height } = cur_image_size;
     if (width === 0 || height === 0) return;
 
-    const hasBlur = !skipBlur && (blur_params.radius_x > 0 || blur_params.radius_y > 0);
+    const hasBlur = blur_params.radius_x > 0 || blur_params.radius_y > 0;
     // Allocate an output only when a blur actually needs it.
     const recursiveBlur = blur_params.mode === BlurMode.FAST_GAUSSIAN &&
         Math.max(blur_params.radius_x, blur_params.radius_y) >= 9;
@@ -686,6 +697,11 @@ async function render(captureFrame = null, skipBlur = false) {
                 blurredOutput = tex_blur_tmp;
             }
         }
+    }
+
+    if (blurOnly) {
+        gpu_device.queue.submit([commandEncoder.finish()]);
+        return;
     }
 
     // Update the texture list UI
@@ -846,11 +862,89 @@ function setupEventHandlers() {
     const renderVideo = document.getElementById('renderVideo');
     const videoStatus = document.getElementById('videoStatus');
     let videoURL = null;
-    renderVideo.addEventListener('click', () => renderVideoCycle(false));
-    document.getElementById('timeNoopVideo').addEventListener('click', () => renderVideoCycle(true));
+    renderVideo.addEventListener('click', () => renderVideoCycle());
 
-    async function renderVideoCycle(skipBlur) {
+    const benchmarkButton = document.getElementById('benchmark');
+    const benchmarkStatus = document.getElementById('benchmarkStatus');
+    let benchmarkURL = null;
+    let cancelBenchmark = false;
+    benchmarkButton.addEventListener('click', async () => {
+        if (benchmarking) { cancelBenchmark = true; benchmarkButton.disabled = true; return; }
         if (renderingVideo) return;
+        if (!gpu_device || !tex_source || loadingImage) {
+            benchmarkStatus.textContent = 'Load an image before benchmarking.';
+            return;
+        }
+        benchmarking = true;
+        cancelBenchmark = false;
+        const savedParams = { ...blur_params };
+        const savedSelection = selectedTextureIndex;
+        const resumeAnimation = animateRadius.checked;
+        const controls = [...document.querySelectorAll('input, select, button')];
+        const disabledStates = controls.map(control => control.disabled);
+        animateRadius.checked = false;
+        if (animationFrame !== null) cancelAnimationFrame(animationFrame);
+        animationFrame = null;
+        animationStart = null;
+        controls.forEach(control => { control.disabled = true; });
+        benchmarkButton.disabled = false;
+        benchmarkButton.textContent = 'Cancel benchmark';
+        dropzone.inert = true;
+        let gpuError = null;
+        const onGPUError = event => { gpuError = event.error; };
+        gpu_device.addEventListener('uncapturederror', onGPUError);
+        try {
+            const results = await benchmarkBlur({
+                device: gpu_device,
+                methods: [
+                    { mode: BlurMode.GAUSSIAN, name: 'Gaussian', color: '#c6534a' },
+                    { mode: BlurMode.FAST_GAUSSIAN, name: 'Fast Gaussian', color: '#3277ad' },
+                    { mode: BlurMode.DUAL_KAWASE, name: 'Dual Kawase', color: '#9554a0' },
+                    { mode: BlurMode.SKIA_GAUSSIAN, name: 'Skia Gaussian', color: '#b77b22' },
+                    { mode: BlurMode.SMOL_GAUSSIAN, name: 'Smol Gaussian', color: '#37834c', emphasized: true },
+                ],
+                setCase: (mode, radius) => {
+                    Object.assign(blur_params, { mode, radius_x: radius, radius_y: radius, lock_radius: true, disable_smol_blending: false });
+                },
+                renderFrame: () => render(null, true),
+                onProgress: message => { benchmarkStatus.textContent = message; },
+                isCancelled: () => {
+                    if (gpuError) throw gpuError;
+                    return cancelBenchmark;
+                },
+            });
+            const svg = makeBenchmarkSVG(results, cur_image_size.width, cur_image_size.height);
+            if (benchmarkURL) URL.revokeObjectURL(benchmarkURL);
+            benchmarkURL = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+            // The locally generated SVG is also the exact downloadable artifact.
+            const preview = new DOMParser().parseFromString(svg, 'image/svg+xml').documentElement;
+            const result = document.getElementById('benchmarkResult');
+            result.replaceChildren(document.importNode(preview, true));
+            result.hidden = false;
+            const download = document.createElement('a');
+            download.href = benchmarkURL;
+            download.download = `blur-benchmark-${cur_image_size.width}x${cur_image_size.height}.svg`;
+            download.textContent = 'Download SVG';
+            benchmarkStatus.replaceChildren('Benchmark complete. ', download);
+            result.appendChild(download.cloneNode(true));
+        } catch (error) {
+            benchmarkStatus.textContent = cancelBenchmark ? 'Benchmark cancelled.' : `Benchmark failed: ${error.message}`;
+        } finally {
+            gpu_device.removeEventListener('uncapturederror', onGPUError);
+            benchmarking = false;
+            Object.assign(blur_params, savedParams);
+            selectedTextureIndex = savedSelection;
+            controls.forEach((control, i) => { control.disabled = disabledStates[i]; });
+            benchmarkButton.textContent = 'Benchmark';
+            dropzone.inert = false;
+            await render();
+            animateRadius.checked = resumeAnimation;
+            if (resumeAnimation) animationFrame = requestAnimationFrame(animateBlurRadius);
+        }
+    });
+
+    async function renderVideoCycle() {
+        if (renderingVideo || benchmarking) return;
         if (!gpu_device || !tex_source || loadingImage) {
             videoStatus.textContent = 'Load an image before rendering a video.';
             return;
@@ -859,7 +953,6 @@ function setupEventHandlers() {
             videoStatus.textContent = 'Video export requires a browser with WebCodecs video encoding (HTTPS or localhost).';
             return;
         }
-        const started = performance.now();
         renderingVideo = true;
         const resumeAnimation = animateRadius.checked;
         const savedParams = { ...blur_params };
@@ -886,7 +979,7 @@ function setupEventHandlers() {
                 canvas: document.getElementById('canvas'),
                 renderFrame: (elapsed, capture) => {
                     setAnimatedRadius(elapsed);
-                    return render(capture, skipBlur);
+                    return render(capture);
                 },
                 onProgress: (done, total) => {
                     videoStatus.textContent = `Rendering video: ${done}/${total} frames…`;
@@ -895,12 +988,11 @@ function setupEventHandlers() {
             videoURL = URL.createObjectURL(blob);
             const download = document.createElement('a');
             download.href = videoURL;
-            download.download = `blur-anim-${skipBlur ? 'noop' : method}.mp4`;
+            download.download = `blur-anim-${method}.mp4`;
             download.textContent = 'Download again';
             videoStatus.replaceChildren(download);
             download.click();
-            const elapsed = ((performance.now() - started) / 1000).toFixed(2);
-            videoStatus.prepend(`${skipBlur ? 'No-op video' : 'Video'} rendered and encoded in ${elapsed}s (${BLUR_ANIMATION_DURATION / 1000}s video, 60 fps). `);
+            videoStatus.prepend(`Video rendered (${BLUR_ANIMATION_DURATION / 1000}s video, 60 fps). `);
         } catch (error) {
             videoStatus.textContent = `Video export failed: ${error.message}`;
         } finally {
