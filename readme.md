@@ -279,7 +279,7 @@ spacing. After a warm-up sweep, it runs four sweeps and plots the minimum
 batch-average milliseconds per frame at each radius. Each batch waits for the
 WebGPU queue before and after timing; CPU command preparation, GPU execution,
 and GPU idle time are included. Display, UI updates, and video encoding are excluded.
-Smol blending is enabled for these comparisons. Batches target 30 ms using the
+Smol blending follows the “No level blend (smol)” checkbox; its setting is recorded in SVG metadata. Batches target 30 ms using the
 warm-up estimate, with 1–128 renders per batch.
 
 The SVG is displayed directly below the image, with a Download SVG link. It has
@@ -328,3 +328,10 @@ all on Chrome browser:
   which itself is adapted from [tinyexr](https://github.com/syoyo/tinyexr).
 - `js/fflate.js` is gzip/deflate decoder needed for EXR loading,
   from [fflate](https://101arrowz.github.io/fflate/).
+
+Benchmark methods stop at the first completed warm-up, calibration, or measured
+per-frame timing above 1500 ms, skipping that radius on subsequent sweeps and
+all larger radii for that method. Other methods continue. The SVG line ends at
+the triggering radius; if necessary, that endpoint uses the warm-up/calibration
+observation, recorded in metadata along with the cutoff. This cannot prevent a
+device timeout if the first slow render itself exceeds the driver limit.

@@ -1,20 +1,28 @@
 // Queue-drained wall-clock measurements include CPU submission and GPU idle time.
 // Revisit every radius on each sweep to spread clock/thermal drift across points.
 async function benchmarkBlur({ device, methods, setCase, renderFrame, onProgress, isCancelled }) {
+    // Resolve to an Error rather than rejecting an otherwise unobserved promise.
+    const lost = device.lost.then(info => new Error(`GPU device lost (${info.reason}): ${info.message || 'Reload the page to recover.'}`));
+    async function waitForGPU() {
+        const result = await Promise.race([device.queue.onSubmittedWorkDone(), lost]);
+        if (result instanceof Error) throw result;
+        check();
+    }
     const radii = [];
     for (let r = 5; r < 1000 / 1.1; r *= 1.2) radii.push(Math.round(r));
     // Merge the last near-endpoint sample into 1000 to keep labels readable.
     radii.push(1000);
     const series = methods.map(method => ({ ...method, points: radii.map(radius => ({ radius, samples: [], iterations: 1 })) }));
     const sweeps = 4;
+    const cutoffMs = 1500;
     let lastProgressUpdate = -Infinity;
     const check = () => { if (isCancelled()) throw new Error('Benchmark cancelled.'); };
     async function batch(iterations) {
-        await device.queue.onSubmittedWorkDone();
+        await waitForGPU();
         check();
         const start = performance.now();
-        for (let i = 0; i < iterations; ++i) await renderFrame();
-        await device.queue.onSubmittedWorkDone();
+        for (let i = 0; i < iterations; ++i) { check(); await renderFrame(); }
+        await waitForGPU();
         return (performance.now() - start) / iterations;
     }
     for (let sweep = 0; sweep <= sweeps; ++sweep) {
@@ -24,6 +32,17 @@ async function benchmarkBlur({ device, methods, setCase, renderFrame, onProgress
                 check();
                 const result = series[(m + sweep) % series.length];
                 const point = result.points[i];
+                if (result.cutoff && point.radius >= result.cutoff.radius) continue;
+                const stopIfSlow = (ms, source) => {
+                    if (ms <= cutoffMs) return false;
+                    result.cutoff = { radius: point.radius, ms, source, limitMs: cutoffMs };
+                    // Retain the triggering observation if no measured sample exists.
+                    if (!point.samples.length) {
+                        point.samples.push(ms);
+                        point.sampleSource = source;
+                    }
+                    return true;
+                };
                 if (performance.now() - lastProgressUpdate >= 200) {
                     onProgress(`${sweep === 0 ? 'Warm-up' : `Sweep ${sweep}/${sweeps}`} · ${result.name} · radius ${point.radius}`);
                     lastProgressUpdate = performance.now();
@@ -31,27 +50,34 @@ async function benchmarkBlur({ device, methods, setCase, renderFrame, onProgress
                     await new Promise(resolve => setTimeout(resolve, 0));
                 }
                 setCase(result.mode, point.radius);
+                await waitForGPU();
+                const warmupStart = performance.now();
                 await renderFrame();
-                await device.queue.onSubmittedWorkDone();
-                const ms = await batch(sweep === 0 ? 2 : point.iterations);
+                await waitForGPU();
+                if (stopIfSlow(performance.now() - warmupStart, 'warm-up')) continue;
+                const ms = await batch(sweep === 0 ? 1 : point.iterations);
                 if (sweep === 0) {
                     // Aim for 30 ms batches; bound queued work on fast devices.
                     point.iterations = Math.max(1, Math.min(128, Math.ceil(30 / Math.max(ms, 0.01))));
                 } else {
                     point.samples.push(ms);
                 }
+                stopIfSlow(ms, sweep === 0 ? 'calibration' : 'measurement');
             }
         }
     }
     check();
-    for (const result of series) for (const point of result.points) point.ms = Math.min(...point.samples);
+    for (const result of series) {
+        result.points = result.points.filter(point => point.samples.length && (!result.cutoff || point.radius <= result.cutoff.radius));
+        for (const point of result.points) point.ms = Math.min(...point.samples);
+    }
     return { series, sweeps };
 }
 
 function makeBenchmarkSVG({ series, sweeps }, width, height) {
     const escape = value => String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[c]));
     const values = series.flatMap(s => s.points.map(p => p.ms));
-    if (values.some(v => !Number.isFinite(v) || v <= 0)) throw new Error('Invalid benchmark timing.');
+    if (!values.length || values.some(v => !Number.isFinite(v) || v <= 0)) throw new Error('Invalid benchmark timing.');
     const minimum = Math.min(...values);
     const low = minimum >= 0.05 ? 0.05 : 10 ** Math.floor(Math.log10(minimum / 1.2));
     const high = Math.max(1, Math.max(...values) * 1.6);
@@ -60,7 +86,7 @@ function makeBenchmarkSVG({ series, sweeps }, width, height) {
     const y = ms => bottom - Math.log(ms / low) / Math.log(high / low) * (bottom - top);
     const parts = [`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 ${series.length > 5 ? 610 : 580}" role="img" aria-labelledby="title desc">`,
         `<title id="title">Blur timings (${width}x${height})</title>`,
-        `<desc id="desc">Minimum of ${sweeps} batch averages. CPU and GPU wall-clock milliseconds per frame; logarithmic axes. No display or video encoding.</desc>`,
+        `<desc id="desc">Minimum of up to ${sweeps} batch averages; cutoff endpoints may use a warm-up or calibration observation. Methods stop at the first observation above 1500 ms. CPU and GPU wall-clock milliseconds per frame; logarithmic axes. No display or video encoding.</desc>`,
         '<rect width="100%" height="100%" fill="white"/>',
         '<g font-family="sans-serif" fill="#333">',
         `<text x="95" y="30" font-size="20">Blur timings (${width}x${height})</text>`];
@@ -74,7 +100,8 @@ function makeBenchmarkSVG({ series, sweeps }, width, height) {
                 `<text x="85" y="${y(tick) + 4}" text-anchor="end" font-size="12">${Number(tick.toPrecision(4))}</text>`);
         }
     }
-    for (const { radius } of series[0].points) {
+    const radii = [...new Set(series.flatMap(s => s.points.map(p => p.radius)))].sort((a, b) => a - b);
+    for (const radius of radii) {
         parts.push(`<path d="M${x(radius)} ${top}V${bottom}" stroke="#eee"/>`,
             `<text x="${x(radius)}" y="501" text-anchor="middle" font-size="12">${radius}</text>`);
     }
@@ -85,8 +112,11 @@ function makeBenchmarkSVG({ series, sweeps }, width, height) {
         parts.push(`<polyline points="${result.points.map(p => `${x(p.radius)},${y(p.ms)}`).join(' ')}" fill="none" stroke="${result.color}" stroke-width="${result.emphasized ? 4 : 2.5}"/>`);
     }
     // Place labels together by radius, separating close methods vertically.
-    for (let i = 0; i < series[0].points.length; ++i) {
-        const column = series.map(s => ({ s, p: s.points[i], labelY: y(s.points[i].ms) - 10 })).sort((a, b) => a.labelY - b.labelY);
+    for (let i = 0; i < radii.length; ++i) {
+        const column = series.flatMap(s => {
+            const p = s.points.find(p => p.radius === radii[i]);
+            return p ? [{ s, p, labelY: y(p.ms) - 10 }] : [];
+        }).sort((a, b) => a.labelY - b.labelY);
         for (let j = 1; j < column.length; ++j) column[j].labelY = Math.max(column[j].labelY, column[j - 1].labelY + 16);
         const overflow = Math.max(0, column.at(-1).labelY - (bottom - 5));
         for (const { s, p, labelY } of column) {

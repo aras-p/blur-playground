@@ -383,6 +383,8 @@ const blur_params = {
 
 // ================ Initialization
 
+let gpuDeviceLost = false;
+
 async function initWebGPU() {
     const statusEl = document.getElementById('status');
     const errorEl = document.getElementById('error');
@@ -402,6 +404,14 @@ async function initWebGPU() {
 
         const requiredFeatures = ['float32-filterable', 'float32-blendable'];
         gpu_device = await adapter.requestDevice({ requiredFeatures });
+        gpu_device.lost.then(info => {
+            gpuDeviceLost = true;
+            document.getElementById('animateRadius').checked = false;
+            errorEl.textContent = `GPU device lost (${info.reason}): ${info.message || 'The GPU stopped responding.'} Reload the page to recover.`;
+            statusEl.textContent = 'GPU unavailable. Reload required.';
+            document.getElementById('renderVideo').disabled = true;
+            document.getElementById('benchmark').disabled = true;
+        });
         gpu_ctx = canvas.getContext('webgpu');
         gpu_canvas_format = navigator.gpu.getPreferredCanvasFormat();
 
@@ -665,7 +675,7 @@ function getDisplayTexture(blurredOutput) {
 // ================ Rendering
 
 async function render(captureFrame = null, blurOnly = false) {
-    if (!gpu_device || !tex_source) return;
+    if (gpuDeviceLost || !gpu_device || !tex_source) return;
 
     const { width, height } = cur_image_size;
     if (width === 0 || height === 0) return;
@@ -916,7 +926,7 @@ function setupEventHandlers() {
     benchmarkButton.addEventListener('click', async () => {
         if (benchmarking) { cancelBenchmark = true; benchmarkButton.disabled = true; return; }
         if (renderingVideo) return;
-        if (!gpu_device || !tex_source || loadingImage) {
+        if (gpuDeviceLost || !gpu_device || !tex_source || loadingImage) {
             benchmarkStatus.textContent = 'Load an image before benchmarking.';
             return;
         }
@@ -952,10 +962,10 @@ function setupEventHandlers() {
                     { mode: BlurMode.DUAL_KAWASE, name: 'Dual Kawase', color: '#9554a0' },
                     { mode: BlurMode.SKIA_GAUSSIAN, name: 'Skia Gaussian', color: '#b77b22' },
                     { mode: BlurMode.RYG, name: 'Ryg Blur', color: '#168c91', boxCount: blur_params.ryg_box_count },
-                    { mode: BlurMode.SMOL_GAUSSIAN, name: 'Smol Gaussian', color: '#37834c', emphasized: true },
+                    { mode: BlurMode.SMOL_GAUSSIAN, name: 'Smol Gaussian', color: '#37834c', emphasized: true, disableLevelBlending: savedParams.disable_smol_blending },
                 ].filter(method => selectedModes.has(method.mode)),
                 setCase: (mode, radius) => {
-                    Object.assign(blur_params, { mode, radius_x: radius, radius_y: radius, lock_radius: true, disable_smol_blending: false });
+                    Object.assign(blur_params, { mode, radius_x: radius, radius_y: radius, lock_radius: true });
                 },
                 renderFrame: () => render(null, true),
                 onProgress: message => { benchmarkStatus.textContent = message; },
@@ -976,7 +986,8 @@ function setupEventHandlers() {
             download.href = benchmarkURL;
             download.download = `blur-benchmark-${cur_image_size.width}x${cur_image_size.height}.svg`;
             download.textContent = 'Download SVG';
-            benchmarkStatus.replaceChildren('Benchmark complete. ', download);
+            const stopped = results.series.filter(s => s.cutoff).map(s => `${s.name} at radius ${s.cutoff.radius}`);
+            benchmarkStatus.replaceChildren(`Benchmark complete. ${stopped.length ? '1.5 s cutoff: ' + stopped.join(', ') + '. ' : ''}`, download);
             result.appendChild(download.cloneNode(true));
         } catch (error) {
             benchmarkStatus.textContent = cancelBenchmark ? 'Benchmark cancelled.' : `Benchmark failed: ${error.message}`;
@@ -989,14 +1000,18 @@ function setupEventHandlers() {
             benchmarkButton.textContent = 'Benchmark';
             dropzone.inert = false;
             await render();
-            animateRadius.checked = resumeAnimation;
-            if (resumeAnimation) animationFrame = requestAnimationFrame(animateBlurRadius);
+            if (gpuDeviceLost) {
+                benchmarkButton.disabled = true;
+                renderVideo.disabled = true;
+            }
+            animateRadius.checked = resumeAnimation && !gpuDeviceLost;
+            if (resumeAnimation && !gpuDeviceLost) animationFrame = requestAnimationFrame(animateBlurRadius);
         }
     });
 
     async function renderVideoCycle() {
         if (renderingVideo || benchmarking) return;
-        if (!gpu_device || !tex_source || loadingImage) {
+        if (gpuDeviceLost || !gpu_device || !tex_source || loadingImage) {
             videoStatus.textContent = 'Load an image before rendering a video.';
             return;
         }
