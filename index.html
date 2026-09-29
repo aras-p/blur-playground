@@ -212,10 +212,20 @@ body {
             <label><input type="radio" name="blurMode" value="smol_gaussian" checked> Smol Gaussian</label>
             <label><input type="radio" name="blurMode" value="skia_gaussian"> Skia Gaussian</label>
             <label><input type="radio" name="blurMode" value="dual_kawase"> Dual Kawase</label>
+            <label><input type="radio" name="blurMode" value="ryg"> Ryg Blur</label>
         </div>
+    </div>
+
+    <div class="control-group">
+        <label>Blur Options</label>
         <div class="checkbox-row">
             <input type="checkbox" id="disableSmolBlending">
-            <label for="disableSmolBlending">Disable blending between levels</label>
+            <label for="disableSmolBlending">No level blend (smol)</label>
+        </div>
+        <label for="rygBoxCount">Iteratons (ryg)</label>
+        <div class="slider-row">
+            <input type="range" id="rygBoxCount" min="1" max="5" step="1" value="3" disabled>
+            <span class="value" id="rygBoxCountValue">3</span>
         </div>
     </div>
 
@@ -244,6 +254,12 @@ body {
     </div>
     <div class="control-group benchmark-controls">
         <button type="button" id="benchmark">Benchmark</button>
+        <div class="checkbox-row"><input type="checkbox" name="benchmarkMode" id="benchmark-gaussian" value="gaussian" checked><label for="benchmark-gaussian">Gaussian</label></div>
+        <div class="checkbox-row"><input type="checkbox" name="benchmarkMode" id="benchmark-fast_gaussian" value="fast_gaussian" checked><label for="benchmark-fast_gaussian">Fast Gaussian</label></div>
+        <div class="checkbox-row"><input type="checkbox" name="benchmarkMode" id="benchmark-smol_gaussian" value="smol_gaussian" checked><label for="benchmark-smol_gaussian">Smol Gaussian</label></div>
+        <div class="checkbox-row"><input type="checkbox" name="benchmarkMode" id="benchmark-skia_gaussian" value="skia_gaussian" checked><label for="benchmark-skia_gaussian">Skia Gaussian</label></div>
+        <div class="checkbox-row"><input type="checkbox" name="benchmarkMode" id="benchmark-dual_kawase" value="dual_kawase" checked><label for="benchmark-dual_kawase">Dual Kawase</label></div>
+        <div class="checkbox-row"><input type="checkbox" name="benchmarkMode" id="benchmark-ryg" value="ryg" checked><label for="benchmark-ryg">Ryg Blur</label></div>
         <div id="benchmarkStatus" role="status" aria-live="polite"></div>
     </div>
 
@@ -269,6 +285,7 @@ body {
 <script src="js/dual-kawase.js"></script>
 <script src="js/fast-gaussian.js"></script>
 <script src="js/skia-gaussian.js"></script>
+<script src="js/ryg-blur.js"></script>
 <script src="js/video-export.js"></script>
 <script src="js/benchmark.js"></script>
 <script>
@@ -347,11 +364,13 @@ const BlurMode = {
     SMOL_GAUSSIAN: 'smol_gaussian',
     SKIA_GAUSSIAN: 'skia_gaussian',
     DUAL_KAWASE: 'dual_kawase',
+    RYG: 'ryg',
 };
 
 const blur_params = {
     mode: BlurMode.SMOL_GAUSSIAN,
     disable_smol_blending: false,
+    ryg_box_count: 3,
     radius_x: 96,
     radius_y: 96,
     lock_radius: false,
@@ -395,6 +414,7 @@ async function initWebGPU() {
         initDualKawase();
         skiaGaussian = new SkiaGaussian(gpu_device, FULLSCREEN_VERTEX_SHADER);
         initSmolGaussian();
+        initRygBlur();
 
         statusEl.textContent = 'WebGPU ready. Load an image to begin.';
         return true;
@@ -649,7 +669,7 @@ async function render(captureFrame = null, blurOnly = false) {
     // Allocate an output only when a blur actually needs it.
     const recursiveBlur = blur_params.mode === BlurMode.FAST_GAUSSIAN &&
         Math.max(blur_params.radius_x, blur_params.radius_y) >= 9;
-    if (hasBlur) ensureBlurTextures(width, height, recursiveBlur ? GPUTextureUsage.STORAGE_BINDING : 0);
+    if (hasBlur) ensureBlurTextures(width, height, (recursiveBlur || blur_params.mode === BlurMode.RYG) ? GPUTextureUsage.STORAGE_BINDING : 0);
 
     // Reset resource pools for this frame
     resetKawaseUniformBufferPool();
@@ -664,7 +684,10 @@ async function render(captureFrame = null, blurOnly = false) {
 
     // Apply blur if radius > 0
     if (hasBlur) {
-        if (blur_params.mode === BlurMode.DUAL_KAWASE) {
+        if (blur_params.mode === BlurMode.RYG) {
+            blurRyg(commandEncoder, tex_source, tex_blurred);
+            blurredOutput = tex_blurred;
+        } else if (blur_params.mode === BlurMode.DUAL_KAWASE) {
             blurDualKawase(commandEncoder, tex_source, tex_blurred);
             blurredOutput = tex_blurred;
         } else if (blur_params.mode === BlurMode.FAST_GAUSSIAN) {
@@ -798,6 +821,14 @@ function setupEventHandlers() {
         });
     });
 
+    const rygBoxCount = document.getElementById('rygBoxCount');
+    rygBoxCount.addEventListener('input', () => {
+        blur_params.ryg_box_count = Number(rygBoxCount.value);
+        document.getElementById('rygBoxCountValue').textContent = rygBoxCount.value;
+        resetTextureSelection();
+        onBlurParamsChanged();
+    });
+
     // Blur mode radio buttons
     const disableSmolBlending = document.getElementById('disableSmolBlending');
     disableSmolBlending.disabled = blur_params.mode !== BlurMode.SMOL_GAUSSIAN;
@@ -809,6 +840,7 @@ function setupEventHandlers() {
     document.querySelectorAll('input[name="blurMode"]').forEach(radio => {
         radio.addEventListener('change', (e) => {
             blur_params.mode = e.target.value;
+            rygBoxCount.disabled = blur_params.mode !== BlurMode.RYG;
             disableSmolBlending.disabled = blur_params.mode !== BlurMode.SMOL_GAUSSIAN;
             // Reset texture selection to final output when blur mode changes
             resetTextureSelection();
@@ -875,6 +907,11 @@ function setupEventHandlers() {
             benchmarkStatus.textContent = 'Load an image before benchmarking.';
             return;
         }
+        const selectedModes = new Set([...document.querySelectorAll('input[name="benchmarkMode"]:checked')].map(control => control.value));
+        if (selectedModes.size === 0) {
+            benchmarkStatus.textContent = 'Select at least one blur mode to benchmark.';
+            return;
+        }
         benchmarking = true;
         cancelBenchmark = false;
         const savedParams = { ...blur_params };
@@ -901,8 +938,9 @@ function setupEventHandlers() {
                     { mode: BlurMode.FAST_GAUSSIAN, name: 'Fast Gaussian', color: '#3277ad' },
                     { mode: BlurMode.DUAL_KAWASE, name: 'Dual Kawase', color: '#9554a0' },
                     { mode: BlurMode.SKIA_GAUSSIAN, name: 'Skia Gaussian', color: '#b77b22' },
+                    { mode: BlurMode.RYG, name: 'Ryg Blur', color: '#168c91', boxCount: blur_params.ryg_box_count },
                     { mode: BlurMode.SMOL_GAUSSIAN, name: 'Smol Gaussian', color: '#37834c', emphasized: true },
-                ],
+                ].filter(method => selectedModes.has(method.mode)),
                 setCase: (mode, radius) => {
                     Object.assign(blur_params, { mode, radius_x: radius, radius_y: radius, lock_radius: true, disable_smol_blending: false });
                 },

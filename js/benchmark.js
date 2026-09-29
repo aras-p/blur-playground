@@ -58,7 +58,7 @@ function makeBenchmarkSVG({ series, sweeps }, width, height) {
     const left = 95, right = 1040, top = 70, bottom = 480;
     const x = radius => left + Math.log(radius / 5) / Math.log(1000 / 5) * (right - left);
     const y = ms => bottom - Math.log(ms / low) / Math.log(high / low) * (bottom - top);
-    const parts = [`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 580" role="img" aria-labelledby="title desc">`,
+    const parts = [`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 ${series.length > 5 ? 610 : 580}" role="img" aria-labelledby="title desc">`,
         `<title id="title">Blur timings (${width}x${height})</title>`,
         `<desc id="desc">Minimum of ${sweeps} batch averages. CPU and GPU wall-clock milliseconds per frame; logarithmic axes. No display or video encoding.</desc>`,
         '<rect width="100%" height="100%" fill="white"/>',
@@ -99,8 +99,10 @@ function makeBenchmarkSVG({ series, sweeps }, width, height) {
     }
     parts.push(...labels);
     series.forEach((s, i) => {
-        const lx = 95 + i * (1000 / series.length);
-        parts.push(`<path d="M${lx} 557h28" stroke="${s.color}" stroke-width="${s.emphasized ? 4 : 2.5}"/><text x="${lx + 38}" y="562" font-size="15" font-weight="${s.emphasized ? 700 : 400}">${escape(s.name)}</text>`);
+        const columns = series.length > 5 ? 3 : series.length;
+        const lx = 95 + (i % columns) * (1000 / columns);
+        const ly = 557 + Math.floor(i / columns) * 28;
+        parts.push(`<path d="M${lx} ${ly}h28" stroke="${s.color}" stroke-width="${s.emphasized ? 4 : 2.5}"/><text x="${lx + 38}" y="${ly + 5}" font-size="15" font-weight="${s.emphasized ? 700 : 400}">${escape(s.name)}</text>`);
     });
     parts.push('</g></svg>');
     return parts.join('\n');

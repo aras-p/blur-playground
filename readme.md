@@ -225,7 +225,7 @@ same grids and sampling path for the shared suffix, including on odd-sized image
 
 ### Performance
 
-**Benchmark** measures Gaussian, Fast Gaussian, Dual Kawase, Skia Gaussian, and Smol Gaussian
+**Benchmark** measures Gaussian, Fast Gaussian, Dual Kawase, Skia Gaussian, Ryg Blur, and Smol Gaussian
 on the loaded image with equal X/Y radii, from 5 to 1000 at approximately 1.2×
 spacing. After a warm-up sweep, it runs four sweeps and plots the minimum
 batch-average milliseconds per frame at each radius. Each batch waits for the
@@ -280,3 +280,27 @@ all on Chrome browser:
   which itself is adapted from [tinyexr](https://github.com/syoyo/tinyexr).
 - `js/fflate.js` is gzip/deflate decoder needed for EXR loading,
   from [fflate](https://101arrowz.github.io/fflate/).
+
+### Ryg Blur
+
+Based on Fabian Giesen’s [Fast blurs 1](https://fgiesen.wordpress.com/2012/07/30/fast-blurs-1/)
+and [Fast blurs 2](https://fgiesen.wordpress.com/2012/08/01/fast-blurs-2/).
+`js/ryg-blur.js` uses a compute invocation per scanline with a moving sum,
+using two hardware-filtered samples per update for fractional box endpoints.
+This trades interpolation precision for fewer sampling instructions: sampler
+subtexel weight precision can cause recurrence errors, especially at small radii.
+Initialization uses exact texture loads. Boundaries
+clamp to the edge; sums and intermediate textures use 32-bit floats.
+
+**Iteratons (ryg)** under **Blur Options** selects 1–5 boxes per axis (default 3), enabled only
+for this method. Each box’s exact discrete variance is matched to
+`(radius / 3)² / count`, so increasing count changes the approximation’s shape
+while preserving its variance. Zero-radius axes are skipped. The benchmark
+uses the selected count, records it in SVG metadata, and plots Ryg in teal
+before Smol Gaussian. Its scanline dependencies limit GPU parallelism, so
+performance should be judged using the benchmark rather than assumed from
+its low sample count. Initialization still costs O(box radius) per scanline.
+
+Benchmark checkboxes select which methods to measure (all selected by default).
+Deselected methods are skipped; remaining methods retain their chart colors and
+Smol Gaussian remains last. Select at least one method before starting.
