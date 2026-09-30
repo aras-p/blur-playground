@@ -169,6 +169,10 @@ body {
     text-align: right;
     font-family: monospace;
 }
+#rotationValue {
+    flex: 0 0 6ch;
+    min-width: 6ch;
+}
 .slider-row.disabled label,
 .slider-row.disabled .value {
     color: #555;
@@ -238,6 +242,12 @@ body {
             <input type="checkbox" id="lockRadius">
             <label for="lockRadius">Lock X & Y</label>
         </div>
+        <label>Animation</label>
+        <div class="slider-row">
+            <label for="rotation">Rotation:</label>
+            <input type="range" id="rotation" min="-30" max="30" step="0.1" value="0">
+            <span class="value" id="rotationValue">0°</span>
+        </div>
         <div class="checkbox-row">
             <input type="checkbox" id="animateRadius">
             <label for="animateRadius">Animate</label>
@@ -299,6 +309,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 }
 `;
 
+// Rotate in pixel space so non-square images keep their proportions.
+const ROTATE_SHADER = FULLSCREEN_VERTEX_SHADER + `
+@group(0) @binding(0) var smp: sampler;
+@group(0) @binding(1) var tex: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> rotation: vec4f;
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+    let size = vec2f(textureDimensions(tex));
+    let p = (in.uv - 0.5) * size;
+    let c = rotation.x;
+    let s = rotation.y;
+    let uv = vec2f(c * p.x + s * p.y, -s * p.x + c * p.y) / size + 0.5;
+    let color = textureSample(tex, smp, uv);
+    return select(vec4f(0.0, 0.0, 0.0, 1.0), color,
+        all(uv >= vec2f(0.0)) && all(uv <= vec2f(1.0)));
+}
+`;
+
 // ================ WebGPU state
 
 /** @type {GPUDevice} */
@@ -313,6 +341,11 @@ let gpu_sampler_linear = null;
 let gpu_sampler_point = null;
 /** @type {GPUTexture} */
 let tex_source = null;
+let tex_rotated = null;
+let pip_rotate = null;
+let rotationBuffer = null;
+let rotationBindGroup = null;
+let rotationDegrees = 0;
 /** @type {GPUTexture} */
 let tex_blurred = null;
 /** @type {GPURenderPipeline} */
@@ -411,6 +444,10 @@ async function initWebGPU() {
         gpu_sampler_linear = createSampler('linear');
         gpu_sampler_point = createSampler('nearest');
 
+        pip_rotate = createPipeline(ROTATE_SHADER);
+        rotationBuffer = gpu_device.createBuffer({
+            size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
         pip_display = createPipeline(DISPLAY_SHADER, gpu_canvas_format);
         initSeparableBlur();
         initDualKawase();
@@ -496,6 +533,16 @@ function createTextureFromLinearData(linearData) {
     clearTextureCache();
 
     tex_source = createTexture2D(width, height);
+    if (tex_rotated) tex_rotated.destroy();
+    tex_rotated = createTexture2D(width, height);
+    rotationBindGroup = gpu_device.createBindGroup({
+        layout: pip_rotate.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: gpu_sampler_linear },
+            { binding: 1, resource: tex_source.createView() },
+            { binding: 2, resource: { buffer: rotationBuffer } },
+        ],
+    });
 
     gpu_device.queue.writeTexture(
         { texture: tex_source },
@@ -657,7 +704,7 @@ function resetTextureSelection() {
 
 function getDisplayTexture(blurredOutput) {
     if (selectedTextureIndex === -2) {
-        return tex_source;
+        return tex_rotated;
     }
     if (selectedTextureIndex >= 0 && selectedTextureIndex < intermediateTextures.length) {
         return intermediateTextures[selectedTextureIndex].texture;
@@ -666,6 +713,22 @@ function getDisplayTexture(blurredOutput) {
 }
 
 // ================ Rendering
+
+function drawRotatedSource(commandEncoder) {
+    const angle = rotationDegrees * Math.PI / 180;
+    gpu_device.queue.writeBuffer(rotationBuffer, 0, new Float32Array([Math.cos(angle), Math.sin(angle), 0, 0]));
+    const pass = commandEncoder.beginRenderPass({
+        colorAttachments: [{
+            view: tex_rotated.createView(),
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+            loadOp: 'clear', storeOp: 'store',
+        }],
+    });
+    pass.setPipeline(pip_rotate);
+    pass.setBindGroup(0, rotationBindGroup);
+    pass.draw(3);
+    pass.end();
+}
 
 async function render(captureFrame = null, blurOnly = false) {
     if (gpuDeviceLost || !gpu_device || !tex_source) return;
@@ -687,33 +750,36 @@ async function render(captureFrame = null, blurOnly = false) {
 
     const commandEncoder = gpu_device.createCommandEncoder();
 
+    // Benchmarks prepare this texture once, outside all timed submissions.
+    if (!blurOnly) drawRotatedSource(commandEncoder);
+
     // Determine which texture to display (before selection override)
-    let blurredOutput = tex_source;
+    let blurredOutput = tex_rotated;
 
     // Apply blur if radius > 0
     if (hasBlur) {
         if (blur_params.mode === BlurMode.RYG) {
-            blurRyg(commandEncoder, tex_source, tex_blurred);
+            blurRyg(commandEncoder, tex_rotated, tex_blurred);
             blurredOutput = tex_blurred;
         } else if (blur_params.mode === BlurMode.DUAL_KAWASE) {
-            blurDualKawase(commandEncoder, tex_source, tex_blurred);
+            blurDualKawase(commandEncoder, tex_rotated, tex_blurred);
             blurredOutput = tex_blurred;
         } else if (blur_params.mode === BlurMode.FAST_GAUSSIAN) {
-            blurFastGaussian(commandEncoder, tex_source, tex_blurred);
+            blurFastGaussian(commandEncoder, tex_rotated, tex_blurred);
             blurredOutput = tex_blurred;
         } else if (blur_params.mode === BlurMode.SKIA_GAUSSIAN) {
-            skiaGaussian.blur(commandEncoder, tex_source, tex_blurred,
+            skiaGaussian.blur(commandEncoder, tex_rotated, tex_blurred,
                 blur_params.radius_x, blur_params.radius_y, intermediateTextures);
             blurredOutput = tex_blurred;
         } else if (blur_params.mode === BlurMode.SMOL_GAUSSIAN) {
-            blurSmolGaussian(commandEncoder, tex_source, tex_blurred);
+            blurSmolGaussian(commandEncoder, tex_rotated, tex_blurred);
             blurredOutput = tex_blurred;
         } else {
             const tex_blur_tmp = blur_params.radius_x > 0 && blur_params.radius_y > 0
                 ? getCachedTexture(width, height) : tex_blurred;
             // Horizontal pass: input -> temp (or directly to output for X only)
             if (blur_params.radius_x > 0) {
-                separablePass(commandEncoder, tex_source, tex_blur_tmp, blur_params.mode, true, blur_params.radius_x);
+                separablePass(commandEncoder, tex_rotated, tex_blur_tmp, blur_params.mode, true, blur_params.radius_x);
                 intermediateTextures.push({
                     texture: tex_blur_tmp,
                     name: `Horizontal: ${tex_blur_tmp.width}×${tex_blur_tmp.height}`
@@ -721,7 +787,7 @@ async function render(captureFrame = null, blurOnly = false) {
             }
             // Vertical pass: temp -> output (or input -> output if no horizontal)
             if (blur_params.radius_y > 0) {
-                const vertInput = blur_params.radius_x > 0 ? tex_blur_tmp : tex_source;
+                const vertInput = blur_params.radius_x > 0 ? tex_blur_tmp : tex_rotated;
                 separablePass(commandEncoder, vertInput, tex_blurred, blur_params.mode, false, blur_params.radius_y);
                 blurredOutput = tex_blurred;
             } else {
@@ -855,6 +921,17 @@ function setupEventHandlers() {
     const radiusYRow = document.getElementById('radiusYRow');
     const lockRadius = document.getElementById('lockRadius');
     const animateRadius = document.getElementById('animateRadius');
+    const rotation = document.getElementById('rotation');
+    const rotationValue = document.getElementById('rotationValue');
+    function setRotation(degrees) {
+        rotationDegrees = degrees;
+        rotation.value = degrees;
+        rotationValue.textContent = `${Number(degrees.toFixed(1))}°`;
+    }
+    rotation.addEventListener('input', () => {
+        setRotation(Number(rotation.value));
+        onBlurParamsChanged();
+    });
     let animationFrame = null;
     let animationStart = null;
 
@@ -867,18 +944,31 @@ function setupEventHandlers() {
         const y = blur_params.lock_radius ? x : phase < 1 ? phase : (1 - shrink) ** 2;
         const min = Number(radiusX.min);
         const max = Number(radiusX.max);
-        blur_params.radius_x = Math.round(min + x * (max - min));
-        blur_params.radius_y = Math.round(min + y * (max - min));
+        // Use a squared curve to linger at low radii on both legs.
+        blur_params.radius_x = Math.round(min + x ** 2 * (max - min));
+        blur_params.radius_y = Math.round(min + y ** 2 * (max - min));
         radiusX.value = blur_params.radius_x;
         radiusY.value = blur_params.radius_y;
         radiusXValue.textContent = blur_params.radius_x;
         radiusYValue.textContent = blur_params.radius_y;
     }
 
+    function setAnimation(elapsed) {
+        // Match video export, including independent X/Y radii.
+        blur_params.lock_radius = false;
+        lockRadius.checked = false;
+        if (!renderingVideo) radiusY.disabled = false;
+        radiusYRow.classList.remove('disabled');
+        setAnimatedRadius(elapsed);
+        const progress = (elapsed % BLUR_ANIMATION_DURATION) / BLUR_ANIMATION_DURATION;
+        const ramp = 1 - Math.abs(2 * progress - 1);
+        setRotation(-30 * ramp * ramp * (3 - 2 * ramp));
+    }
+
     function animateBlurRadius(timestamp) {
         if (!animateRadius.checked) return;
         if (animationStart === null) animationStart = timestamp;
-        setAnimatedRadius(timestamp - animationStart);
+        setAnimation(timestamp - animationStart);
         onBlurParamsChanged();
         animationFrame = requestAnimationFrame(animateBlurRadius);
     }
@@ -929,6 +1019,10 @@ function setupEventHandlers() {
         const onGPUError = event => { gpuError = event.error; };
         gpu_device.addEventListener('uncapturederror', onGPUError);
         try {
+            const preparation = gpu_device.createCommandEncoder();
+            drawRotatedSource(preparation);
+            gpu_device.queue.submit([preparation.finish()]);
+            // benchmarkBlur drains the queue before starting any measurements.
             const results = await benchmarkBlur({
                 device: gpu_device,
                 methods: [
@@ -997,6 +1091,7 @@ function setupEventHandlers() {
         renderingVideo = true;
         const resumeAnimation = animateRadius.checked;
         const savedParams = { ...blur_params };
+        const savedRotation = rotationDegrees;
         const savedSelection = selectedTextureIndex;
         animateRadius.checked = false;
         if (animationFrame !== null) cancelAnimationFrame(animationFrame);
@@ -1019,7 +1114,7 @@ function setupEventHandlers() {
             const blob = await exportBlurVideo({
                 canvas: document.getElementById('canvas'),
                 renderFrame: (elapsed, capture) => {
-                    setAnimatedRadius(elapsed);
+                    setAnimation(elapsed);
                     return render(capture);
                 },
                 onProgress: (done, total) => {
@@ -1041,6 +1136,7 @@ function setupEventHandlers() {
             controls.forEach((control, i) => { control.disabled = disabledStates[i]; });
             dropzone.inert = false;
             Object.assign(blur_params, savedParams);
+            setRotation(savedRotation);
             lockRadius.checked = savedParams.lock_radius;
             radiusYRow.classList.toggle('disabled', savedParams.lock_radius);
             radiusX.value = radiusXValue.textContent = savedParams.radius_x;
