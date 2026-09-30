@@ -185,8 +185,8 @@ function blurFastGaussian(encoder, input, output) {
     const largest = Math.max(sx, sy);
     if (largest < 3) {
         const tmp = getCachedTexture(input.width, input.height);
-        separablePass(encoder, input, tmp, BlurMode.GAUSSIAN, true, rx);
-        separablePass(encoder, tmp, output, BlurMode.GAUSSIAN, false, ry);
+        separablePass(encoder, input, tmp, true, rx);
+        separablePass(encoder, tmp, output, false, ry);
         intermediateTextures.push({texture: tmp, name: 'Fast Gaussian: horizontal (direct)'});
         return;
     }

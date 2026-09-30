@@ -1,4 +1,4 @@
-// Box, tent, and Gaussian convolution; also used by Fast Gaussian at small radii.
+// Gaussian convolution; also used by Fast Gaussian at small radii.
 
 /** @type {GPURenderPipeline} */
 let pip_separable = null;
@@ -31,25 +31,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 
 // ================ Blur kernel utilities
 
-function separableKernelValue(mode, x) {
-    x = Math.abs(x);
-    switch (mode) {
-        case BlurMode.BOX:
-            return x > 1.0 ? 0.0 : 1.0;
-        case BlurMode.TENT:
-            return x > 1.0 ? 0.0 : 1.0 - x;
-        case BlurMode.GAUSSIAN: {
-            const scale = 1.6;
-            const twoScale2 = 2.0 * scale * scale;
-            x *= 3.0 * scale;
-            return (1.0 / Math.sqrt(Math.PI * twoScale2)) * Math.exp(-x * x / twoScale2);
-        }
-        default:
-            return 0.0;
-    }
+function separableKernelValue(x) {
+    const scale = 1.6;
+    const twoScale2 = 2.0 * scale * scale;
+    x = Math.abs(x) * 3.0 * scale;
+    return (1.0 / Math.sqrt(Math.PI * twoScale2)) * Math.exp(-x * x / twoScale2);
 }
 
-function calcSeparableWeights(mode, radius) {
+function calcSeparableWeights(radius) {
     // Kernel size is radius+1, but since it is symmetric we only store one half
     const size = Math.ceil(radius) + 1;
     const weights = new Float32Array(size);
@@ -57,7 +46,7 @@ function calcSeparableWeights(mode, radius) {
     let sum = 0.0;
 
     // Center weight
-    const centerWeight = separableKernelValue(mode, 0.0);
+    const centerWeight = separableKernelValue(0.0);
     weights[0] = centerWeight;
     sum += centerWeight;
 
@@ -65,7 +54,7 @@ function calcSeparableWeights(mode, radius) {
     // Add double to the sum to account for negative direction
     const scale = radius > 0.0 ? 1.0 / radius : 0.0;
     for (let i = 1; i < size; i++) {
-        const weight = separableKernelValue(mode, i * scale);
+        const weight = separableKernelValue(i * scale);
         weights[i] = weight;
         sum += weight * 2.0;
     }
@@ -82,7 +71,7 @@ function calcSeparableWeights(mode, radius) {
 // passes can be encoded before submission without overwriting each other's data.
 const separableResources = [];
 
-function separablePass(commandEncoder, input, output, mode, horizontal, radius) {
+function separablePass(commandEncoder, input, output, horizontal, radius) {
     const axis = horizontal ? 0 : 1;
     const resources = separableResources[axis] ??= {
         buffer: gpu_device.createBuffer({
@@ -98,10 +87,9 @@ function separablePass(commandEncoder, input, output, mode, horizontal, radius) 
             usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
         });
     }
-    if (resources.mode !== mode || resources.radius !== radius) {
+    if (resources.radius !== radius) {
         gpu_device.queue.writeTexture({ texture: resources.texture },
-            calcSeparableWeights(mode, radius), {}, { width: size });
-        resources.mode = mode;
+            calcSeparableWeights(radius), {}, { width: size });
         resources.radius = radius;
     }
 

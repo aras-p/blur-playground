@@ -210,14 +210,12 @@ body {
     <div class="control-group">
         <label>Blur Mode</label>
         <div class="radio-group">
-            <label><input type="radio" name="blurMode" value="box"> Box</label>
-            <label><input type="radio" name="blurMode" value="tent"> Tent</label>
-            <label><input type="radio" name="blurMode" value="gaussian"> Gaussian</label>
-            <label><input type="radio" name="blurMode" value="fast_gaussian"> Fast Gaussian</label>
-            <label><input type="radio" name="blurMode" value="smol_gaussian" checked> Smol Gaussian</label>
-            <label><input type="radio" name="blurMode" value="skia_gaussian"> Skia Gaussian</label>
-            <label><input type="radio" name="blurMode" value="dual_kawase"> Dual Kawase</label>
-            <label><input type="radio" name="blurMode" value="ryg"> Ryg Blur</label>
+            <label title="Separable Gaussian blur"><input type="radio" name="blurMode" value="gaussian"> Gaussian</label>
+            <label title="Recursive Gaussian blur using Deriche / Van Vliet filters, adapted from Blender 5.2."><input type="radio" name="blurMode" value="fast_gaussian"> Fast Gaussian</label>
+            <label title="Downsampled Gaussian blur."><input type="radio" name="blurMode" value="smol_gaussian" checked> <strong>Smol Gaussian</strong></label>
+            <label title="Downsampled Gaussian blur adapted from Google Skia."><input type="radio" name="blurMode" value="skia_gaussian"> Skia Gaussian</label>
+            <label title="Dual Kawase blur extended to support continuous radii and independent X/Y blur radii."><input type="radio" name="blurMode" value="dual_kawase"> Dual Kawase</label>
+            <label title="Repeated extended box blurs using a moving average, based on Fabian Giesen’s “Fast blurs” blog posts."><input type="radio" name="blurMode" value="ryg"> Ryg Blur</label>
         </div>
         <label for="rygBoxCount">Iteratons (ryg)</label>
         <div class="slider-row">
@@ -383,8 +381,6 @@ function fitCanvasToViewport(imageWidth, imageHeight) {
 // ================ Blur parameters
 
 const BlurMode = {
-    BOX: 'box',
-    TENT: 'tent',
     GAUSSIAN: 'gaussian',
     FAST_GAUSSIAN: 'fast_gaussian',
     SMOL_GAUSSIAN: 'smol_gaussian',
@@ -779,7 +775,7 @@ async function render(captureFrame = null, blurOnly = false) {
                 ? getCachedTexture(width, height) : tex_blurred;
             // Horizontal pass: input -> temp (or directly to output for X only)
             if (blur_params.radius_x > 0) {
-                separablePass(commandEncoder, tex_rotated, tex_blur_tmp, blur_params.mode, true, blur_params.radius_x);
+                separablePass(commandEncoder, tex_rotated, tex_blur_tmp, true, blur_params.radius_x);
                 intermediateTextures.push({
                     texture: tex_blur_tmp,
                     name: `Horizontal: ${tex_blur_tmp.width}×${tex_blur_tmp.height}`
@@ -788,7 +784,7 @@ async function render(captureFrame = null, blurOnly = false) {
             // Vertical pass: temp -> output (or input -> output if no horizontal)
             if (blur_params.radius_y > 0) {
                 const vertInput = blur_params.radius_x > 0 ? tex_blur_tmp : tex_rotated;
-                separablePass(commandEncoder, vertInput, tex_blurred, blur_params.mode, false, blur_params.radius_y);
+                separablePass(commandEncoder, vertInput, tex_blurred, false, blur_params.radius_y);
                 blurredOutput = tex_blurred;
             } else {
                 blurredOutput = tex_blur_tmp;
