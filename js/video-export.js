@@ -16,28 +16,29 @@ async function exportBlurVideo({ canvas, renderFrame, onProgress }) {
     context.imageSmoothingEnabled = true;
     context.imageSmoothingQuality = 'high';
     let config;
-    // Baseline H.264 excludes B-frames, so decode order equals presentation order.
-    // Try levels 4.2 (1080p60) and 5.2 (4K60), checking the actual dimensions.
-    configurations: for (const hardwareAcceleration of ['prefer-hardware', 'no-preference']) {
-        for (const codec of ['avc1.42002a', 'avc1.420034']) {
-            const candidate = {
-                codec, width: capture.width, height: capture.height,
-                bitrate: 3_000_000, bitrateMode: 'variable', framerate: fps,
-                hardwareAcceleration, latencyMode: 'quality', avc: { format: 'avc' },
-            };
-            if ((await VideoEncoder.isConfigSupported(candidate)).supported) {
-                config = candidate;
-                break configurations;
-            }
+    // AV1 Main, 8-bit, level 4.0 covers the export's maximum 960×960 at 60 fps.
+    // Baseline H.264 fallback excludes B-frames, keeping presentation order.
+    for (const codec of ['av01.0.08M.08', 'avc1.42002a', 'avc1.420034']) {
+        const candidate = {
+            codec, width: capture.width, height: capture.height,
+            bitrate: 4_000_000, bitrateMode: 'variable', framerate: fps,
+            latencyMode: 'quality',
+            ...(codec.startsWith('avc1') ? { avc: { format: 'avc' } } : {}),
+        };
+        if ((await VideoEncoder.isConfigSupported(candidate)).supported) {
+            config = candidate;
+            break;
         }
     }
     if (!config) {
-        throw new Error(`H.264 encoding is unavailable at ${capture.width}×${capture.height}. Try a smaller image or another browser.`);
+        throw new Error(`AV1 and H.264 encoding are unavailable at ${capture.width}×${capture.height}. Try a smaller image or another browser.`);
     }
+    const isAV1 = config.codec.startsWith('av01');
 
     const samples = [];
     let description;
     let encodingError;
+    let resumeQueue;
     const encoder = new VideoEncoder({
         output(chunk, metadata) {
             const data = new Uint8Array(chunk.byteLength);
@@ -47,7 +48,11 @@ async function exportBlurVideo({ canvas, renderFrame, onProgress }) {
                 encodingError = new Error('The encoder dropped or reordered a video frame.');
             }
             samples.push({ data, key: chunk.type === 'key' });
-            if (metadata.decoderConfig?.description) {
+            if (isAV1 && !description && chunk.type === 'key') {
+                try { description = makeBlurAV1Config(data); }
+                catch (error) { encodingError = error; }
+            }
+            if (!isAV1 && metadata.decoderConfig?.description) {
                 const next = new Uint8Array(metadata.decoderConfig.description);
                 if (description && (next.length !== description.length || next.some((v, i) => v !== description[i]))) {
                     encodingError = new Error('The encoder changed its H.264 configuration during export.');
@@ -55,8 +60,9 @@ async function exportBlurVideo({ canvas, renderFrame, onProgress }) {
                 description = next.slice();
             }
         },
-        error(error) { encodingError = error; },
+        error(error) { encodingError = error; resumeQueue?.(); },
     });
+    encoder.addEventListener('dequeue', () => resumeQueue?.());
     try {
         encoder.configure(config);
         for (let i = 0; i < frameCount; i++) {
@@ -74,7 +80,11 @@ async function exportBlurVideo({ canvas, renderFrame, onProgress }) {
                 }
             });
             // Bound queued frames and GPU work, and yield so progress can paint.
-            if (encoder.encodeQueueSize >= 8) await encoder.flush();
+            while (encoder.encodeQueueSize >= 8 && !encodingError) {
+                await new Promise(resolve => { resumeQueue = resolve; });
+                resumeQueue = undefined;
+            }
+            if (encodingError) throw encodingError;
             if ((i + 1) % 12 === 0 || i === frameCount - 1) {
                 onProgress(i + 1, frameCount);
                 await new Promise(resolve => setTimeout(resolve, 0));
@@ -83,18 +93,17 @@ async function exportBlurVideo({ canvas, renderFrame, onProgress }) {
         await encoder.flush();
         if (encodingError) throw encodingError;
         if (samples.length !== frameCount || !description || !samples[0].key) {
-            throw new Error('The encoder did not produce a complete H.264 video.');
+            throw new Error('The encoder did not produce a complete video.');
         }
-        return makeBlurMP4(samples, description, capture.width, capture.height, fps);
+        return makeBlurMP4(samples, description, capture.width, capture.height, fps, isAV1);
     } finally {
         if (encoder.state !== 'closed') encoder.close();
     }
 }
 
-// Minimal ISO BMFF writer for one constant-frame-rate AVC video track, no audio,
-// no B-frames, and files below 4 GiB. VideoEncoder supplies length-prefixed NAL
-// units and the AVCDecoderConfigurationRecord used verbatim in the avcC box.
-function makeBlurMP4(samples, avcConfig, width, height, fps) {
+// Minimal ISO BMFF writer for one constant-frame-rate AV1 or AVC video track,
+// no audio, no reordered samples, and files below 4 GiB.
+function makeBlurMP4(samples, codecConfig, width, height, fps, isAV1 = false) {
     const bytes = (...values) => new Uint8Array(values);
     const zeros = size => new Uint8Array(size);
     const text = value => new TextEncoder().encode(value);
@@ -116,15 +125,15 @@ function makeBlurMP4(samples, avcConfig, width, height, fps) {
     const matrix = u32(0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000);
     const count = samples.length;
     const dataSize = samples.reduce((sum, sample) => sum + sample.data.length, 0);
-    const ftyp = box('ftyp', text('isom'), u32(512), text('isomiso2avc1mp41'));
+    const ftyp = box('ftyp', text('isom'), u32(512), text(isAV1 ? 'isomiso2av01mp41' : 'isomiso2avc1mp41'));
     if (dataSize + ftyp.length + 8 >= 0x100000000) throw new Error('Video is too large for this MP4 exporter.');
 
     // All frames occupy one contiguous chunk, immediately after ftyp + mdat header.
     const stbl = box('stbl',
-        fullBox('stsd', 0, u32(1), box('avc1',
+        fullBox('stsd', 0, u32(1), box(isAV1 ? 'av01' : 'avc1',
             zeros(6), u16(1), zeros(16), u16(width), u16(height),
             u32(0x480000, 0x480000, 0), u16(1), zeros(32), u16(24), u16(0xffff),
-            box('avcC', avcConfig))),
+            box(isAV1 ? 'av1C' : 'avcC', codecConfig))),
         fullBox('stts', 0, u32(1, count, 1)),
         fullBox('stsc', 0, u32(1, 1, count, 1)),
         fullBox('stsz', 0, u32(0, count), u32(...samples.map(sample => sample.data.length))),
@@ -145,4 +154,106 @@ function makeBlurMP4(samples, avcConfig, width, height, fps) {
                     stbl))),
     );
     return new Blob([ftyp, u32(dataSize + 8), text('mdat'), ...samples.map(sample => sample.data), moov], { type: 'video/mp4' });
+}
+
+// WebCodecs AV1 has no decoderConfig.description. Build av1C from the actual
+// sequence header (the encoder may choose a different level than requested).
+// Keep the header OBU in av1C as well as in the first sync sample.
+// Layout: https://aomediacodec.github.io/av1-isobmff/#av1codecconfigurationbox
+function makeBlurAV1Config(data) {
+    let start = 0;
+    while (start < data.length) {
+        const header = data[start];
+        let offset = start + 1 + ((header & 4) ? 1 : 0);
+        if (!(header & 2)) throw new Error('AV1 OBU is missing its size field.');
+        let size = 0;
+        let shift = 0;
+        let byte;
+        do {
+            if (offset >= data.length || shift > 49) throw new Error('Invalid AV1 OBU size.');
+            byte = data[offset++];
+            size += (byte & 127) * 2 ** shift;
+            shift += 7;
+        } while (byte & 128);
+        const end = offset + size;
+        if (end > data.length) throw new Error('Truncated AV1 OBU.');
+        if (((header >> 3) & 15) !== 1) { start = end; continue; }
+
+        let bit = offset * 8;
+        const read = count => {
+            if (bit + count > end * 8) throw new Error('Truncated AV1 sequence header.');
+            let value = 0;
+            for (let i = 0; i < count; i++, bit++) value = value * 2 + ((data[bit >> 3] >> (7 - (bit & 7))) & 1);
+            return value;
+        };
+        const profile = read(3);
+        read(1); // still_picture
+        const reduced = read(1);
+        let level, tier = 0;
+        if (reduced) {
+            level = read(5);
+        } else {
+            let decoderModel = 0, delayBits = 0;
+            if (read(1)) { // timing_info_present_flag
+                read(32); read(32);
+                if (read(1)) { // equal_picture_interval: unsigned Exp-Golomb
+                    let leading = 0;
+                    while (!read(1)) {
+                        if (++leading > 31) throw new Error('Invalid AV1 timing information.');
+                    }
+                    read(leading);
+                }
+                decoderModel = read(1);
+                if (decoderModel) { delayBits = read(5) + 1; read(32); read(5); read(5); }
+            }
+            const initialDelay = read(1);
+            const operatingPoints = read(5) + 1;
+            for (let i = 0; i < operatingPoints; i++) {
+                read(12);
+                const pointLevel = read(5);
+                const pointTier = pointLevel > 7 ? read(1) : 0;
+                if (i === 0) { level = pointLevel; tier = pointTier; }
+                if (decoderModel && read(1)) { read(delayBits); read(delayBits); read(1); }
+                if (initialDelay && read(1)) read(4);
+            }
+        }
+        const widthBits = read(4) + 1, heightBits = read(4) + 1;
+        read(widthBits); read(heightBits);
+        if (!reduced && read(1)) { read(4); read(3); } // frame IDs
+        read(1); read(1); read(1); // superblock size, filter intra, intra edge filter
+        if (!reduced) {
+            read(1); read(1); read(1); read(1); // inter-intra, masked compound, warped motion, dual filter
+            const orderHint = read(1);
+            if (orderHint) { read(1); read(1); }
+            const screenContent = read(1) ? 2 : read(1);
+            if (screenContent > 0 && !read(1)) read(1);
+            if (orderHint) read(3);
+        }
+        read(1); read(1); read(1); // super-resolution, CDEF, restoration
+        const highBitdepth = read(1);
+        const twelveBit = profile === 2 && highBitdepth ? read(1) : 0;
+        const monochrome = profile === 1 ? 0 : read(1);
+        let primaries = 2, transfer = 2, matrix = 2;
+        if (read(1)) { primaries = read(8); transfer = read(8); matrix = read(8); }
+        let subX = 0, subY = 0, position = 0;
+        if (monochrome) {
+            read(1);
+            subX = subY = 1;
+        } else if (!(primaries === 1 && transfer === 13 && matrix === 0)) {
+            read(1); // color_range
+            if (profile === 0) { subX = subY = 1; }
+            else if (profile === 2) {
+                subX = twelveBit ? read(1) : 1;
+                subY = twelveBit && subX ? read(1) : 0;
+            }
+            if (subX && subY) position = read(2);
+        }
+        const config = new Uint8Array(4 + end - start);
+        config.set([0x81, (profile << 5) | level,
+            (tier << 7) | (highBitdepth << 6) | (twelveBit << 5) |
+            (monochrome << 4) | (subX << 3) | (subY << 2) | position, 0]);
+        config.set(data.subarray(start, end), 4);
+        return config;
+    }
+    throw new Error('AV1 key frame is missing its sequence header.');
 }
