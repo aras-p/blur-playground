@@ -49,6 +49,52 @@ per axis), apply a small separable Gaussian there, reconstruct to full resolutio
 
 <img src="videos/blur_b_smol_gaussian.avif" width="400">
 
+Here's how it works in imaginary pseudocode:
+```c
+Image smol_gaussian(Image input, float2 radius)
+{
+    float2 sigma = max(radius, 0) / 3;
+    int2 orig_size = input.size;
+    int2 working_size = orig_size;
+    Image image = input;
+
+    // Downsample to the working resolution.
+    while (true)
+    {
+        float2 scale = orig_size / float2(working_size);
+        bool2 reduce = (sigma / scale >= 6) && (working_size > 1);
+        if (!any(reduce))
+            break;
+        int2 next_size = select(working_size, ceil(working_size / 2.0), reduce);
+
+        // Integrate source pixel areas, taking care of odd dimensions.
+        // Keep one pixel border on reduced axes to preserve input edges.
+        // Two consecutive exact halves can be merged into single 4x reduction.
+        image = downsample_with_border_preserve(image, next_size);
+        working_size = next_size;
+    }
+
+    for (axis in {X, Y})
+    {
+        float scale = float(orig_size[axis]) / working_size[axis];
+        float down_variance = (scale * scale - 1) / 12;
+        float up_variance = scale == 1 ? 0 : scale * scale *
+            (scale > 2 ? 1.0/3 : scale == 2 ? 3.0/16 : 1.0/6);
+        // Variance estimates are in original pixels; convert to working pixels.
+        float residual_sigma = sqrt(max(0,
+            sigma[axis] * sigma[axis] - down_variance - up_variance)) / scale;
+
+        // Regular normalized 1D gaussian pass, extending to 4*sigma, smoothly
+        // tapered to zero between 3*sigma and 4*sigma. Pair adjacent weights
+        // into bilinear texture samples; skip axes with negligible sigma.
+        image = gaussian_pass(image, axis, residual_sigma);
+    }
+
+    // Per axis: bilinear up to 2x enlargement, cubic B-spline beyond 2x.
+    return reconstruct(image, orig_size);
+}
+```
+
 The algorithm is similar to Skia's GPU Gaussian blur as of 2026 Sep (`FilterResult::Builder::blur`
 and `FilterResult::rescale` in [SkImageFilterTypes.cpp](https://skia.googlesource.com/skia/+/15a9437eec87/src/core/SkImageFilterTypes.cpp)) - independent X/Y scaling, texture samples placed to use
 bilinear filtering, one pixel border on downsampled images that preserve the original
