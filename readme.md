@@ -1,309 +1,186 @@
-# Blur Playground
+# Blur Playground and the "Smol Gaussian" blur
 
-JavaScript/WebGPU implementation of several image blurring algorithms. Runs in the browser
--- open `index.html` (requires WebGPU capable browser with `float32-filterable` and
-`float32-blendable` features).
+This is a JavaScript/WebGPU toy for comparing image blurring algorithms.
+Primary interest is perhaps the **Smol Gaussian** algorithm: a Gaussian
+approximation that is efficient at large blurs, supports smoothly varying
+blur radius and different X/Y blur amounts. It is somewhat similar to
+GPU blur used in Skia, with several quality improvements.
 
-In order to load provided sample image files, just opening the HTML page
-in a browser won't work. Easiest is then to run `python3 -m http.server 8000`
-and go to `http://localhost:8000/index.html`.
+A handful of other blurs are also implemented here: regular separable Gaussian,
+"recursive" Deriche / Van Vliet, blur from Skia, Dual Kawase with extensions
+to support arbitrary blur sizes and different X/Y radii, and repeated box blurs
+approach from Fabian Giesen's blog posts.
 
-### Code layout
+Requires WebGPU support (including `float32-filterable` and
+`float32-blendable`), you can just open the `index.html`, or serve it locally
+like `python3 -m http.server 8000` and then go to `http://localhost:8000`. The latter
+approach is needed if you want to be able to load `test_a_small` and `test_b_1080p`
+sample files with a single click in the page.
 
-`index.html` contains the UI, image loading, and rendering orchestration.
-Blur shaders, pipelines, and algorithm helpers live in `js/`:
+- Pick any of the six blur modes! *For free!*
+- Drag & drop or browse for images (PNG, JPG and a subset of EXR).
+- Adjustable blur radius, with ability to lock X/Y.
+- Can inspect various intermediate textures produced by a blurring algorithm.
+- `Animate` checkbox animates the radius and the source image rotation.
+- `Render Video` button exports animated blur result into a video file, using the current blur mode.
+  The video is encoded using WebCodecs browser functionality, and resized to max 960px. Blur itself
+  is performed at full image resolution.
+- `Benchmark` button tests increasing blur radii with all the selected blur algorithms,
+  and produces a SVG file with the graphs. The result is displayed at the bottom of the page,
+  and can be downloaded too.
 
-- `separable-blur.js`: Box, Tent, and Gaussian; Fast Gaussian also uses this for small radii.
-- `smol-gaussian.js`: Smol Gaussian.
-- `ryg-blur.js`: repeated fractional box filters evaluated with moving sums.
-- `dual-kawase.js`: Dual Kawase.
-- `fast-gaussian.js` and `skia-gaussian.js`: Fast and Skia Gaussian.
-- `gpu-helpers.js`: shared fullscreen vertex shader, GPU resource helpers, and texture cache.
-- `video-export.js`: WebCodecs H.264 encoding and a minimal MP4 writer.
-- `exrloader.js` and `fflate.js`: EXR decoding and decompression.
+## Blur Modes
 
-The files use classic scripts with shared globals; GPU helpers load before the
-blur implementations. Most pipelines are initialized after device creation;
-Fast Gaussian compute pipelines are created on first use.
+## Smol Gaussian
 
-### Blur Algorithms
+"Downsampled" Gaussian blur: downsample to a working resolution (which could be different
+per axis), apply a small separable Gaussian there, reconstruct to full resolution image.
 
-- **Box**, **Tent**, **Gaussian** - separable blurs
-  implemented with the same shader, just different convolution
-  kernel shapes. Box and Tent are not great blurs; just here
-  because they were easy to do.
-- **Fast Gaussian** - Blender compositor's recursive Gaussian blur: direct convolution
-  for small radii, Deriche for medium radii, and parallel second-order Van Vliet
-  sections for large radii. See details below.
-- **Ryg Blur** - repeated fractional box filters using moving sums, based on
-  Fabian Giesen’s “Fast blurs” posts. Adjustable 1–5 boxes per axis (default 3);
-  see the GPU implementation and precision tradeoffs below.
-- **Smol Gaussian** - a Gaussian approximation using downsampling, small separable
-  filters, and reconstruction, with independently selected working resolutions.
-- **Skia Gaussian** - Skia’s GPU image-filter approach: progressive bilinear
-  downsampling, a small Gaussian, and bilinear reconstruction. Supports independent
-  X/Y radii; see implementation details below.
-- **Dual Kawase** - multi-pass downsample/upsample pyramid blur, from
-  Marius Bjørge, [Bandwidth-Efficient Rendering](https://community.arm.com/cfs-file/__key/communityserver-blogs-components-weblogfiles/00-00-00-20-66/siggraph2015_2D00_mmg_2D00_marius_2D00_notes.pdf) (SIGGRAPH 2015),
-  see also explanation in [this blog post](https://blog.frost.kiwi/dual-kawase/#dual-kawase-blur).
-  This is very fast for large blurs. The original algorithm blurs the same amount
-  horizontally & vertically and only allows very discrete
-  amounts of blur (more or less "powers of two" radii), so to achieve arbitrary radius there's
-  an extra step that blends between two discrete blur amounts, similar to how [obs-composite-blur](https://github.com/FiniteSingularity/obs-composite-blur) does it.
+The algorithm is similar to Skia's GPU Gaussian blur as of 2026 Sep (`FilterResult::Builder::blur`
+and `FilterResult::rescale` in [SkImageFilterTypes.cpp](https://skia.googlesource.com/skia/+/15a9437eec87/src/core/SkImageFilterTypes.cpp)) - independent X/Y scaling, texture samples placed to use
+bilinear filtering, one pixel border on downsampled images that preserve the original
+image edges (this way bright interiors do not overbright the result at large radius).
 
-### Fast Gaussian
+Additions compared to Skia blur are:
 
-Ported from the local Blender checkout at commit
-`02c927c0ffd87e08aca64ceed572b5ff20556b1e`, specifically the compositor's
-`recursive_gaussian_blur.cc`, Deriche/Van Vliet coefficient helpers, and GPU shaders.
-The larger X/Y radius selects the method for **both** axes: direct convolution
-below 9, fourth-order Deriche from 9 to below 96, and Van Vliet from 96 onward.
-Van Vliet uses Blender's pole scaling and partial-fraction decomposition into
-four parallel causal/non-causal second-order filters, not a cascade from the paper.
+- When downsampling odd-sized image, we do more correct pixel area integration,
+  so that isolated bright pixels do not flicker with sampling phase shift.
+- Downsampled levels are ceil-halved sizes, and downsampling kicks in at sigma=6
+  (so in practice, blur sizes 18, 36, 72, 144, ... switch to new level). Skia instead
+  scales continuously, to keep working sigma under 4.
+- When doing the final Gaussian blur, we take into account the blur introduced by downsampling
+  and later reconstruction, i.e. subtract their variance from the blur kernel.
+- The final Gaussian kernel extends to sigma=4 (i.e. not truncated at sigma=3), and
+  weights in sigma 3..4 region are tapered to reach zero. This helps to reduce the
+  "blur is cut off" with very bright highlights, and looks better when radius is animated
+  and number of taps changes.
+- Final reconstruction to full image size uses a cubic B-spline (fully positive kernel, so no
+  ringing) instead of bilinear, beyond 2x enlargement. This helps to avoid slope discontinuities
+  of bilinear.
+- Pairs of exact 2x reductions are done as single 4x reduction as an optimization.
 
-Recursive passes use `sigma = max(radius, 1) / 3` per axis, including an axis
-set to zero, matching Blender. Both radii zero bypass blur. Boundary pixels
-extend indefinitely (Blender's non-extended-bounds mode); the initial recursive
-state uses Blender's boundary coefficients. Independent row scans are followed
-by a sum-and-transpose pass for each axis.
+<details>
+<summary>Discarded idea: crossfading working resolutions</summary>
 
-Textures retain the playground's RGBA32F format rather than Blender's default
-RGBA16F intermediates, so this is an algorithm match, not a bit-for-bit match.
-Single-precision recursive arithmetic can drift, especially just below the
-Deriche/Van Vliet switch; browser/GPU compiler choices also affect rounding.
-The filter retains Blender's approximations, including possible small negative
-lobes and changes at algorithm thresholds.
+I tried blending neighboring resolutions to hide level switches. Idea was this:
+when the resolution that does the final blur changes, in theory you could have
+a visible "jump" if blur radius is animated.
 
-### Ryg Blur
+So if resolution switch happens at sigma=6, then starting at sigma=5 already, do
+both the current resolution and the next resolution, and blend between them using
+a smoothstep curve. Both evaluations target the same final blur amount, just
+at different grid, and so each of them uses different amount of gaussian taps.
 
-Based on Fabian Giesen’s [Fast blurs 1](https://fgiesen.wordpress.com/2012/07/30/fast-blurs-1/)
-and [Fast blurs 2](https://fgiesen.wordpress.com/2012/08/01/fast-blurs-2/).
-`js/ryg-blur.js` uses a compute invocation per scanline with a moving sum,
-using two hardware-filtered samples per update for fractional box endpoints.
-This trades interpolation precision for fewer sampling instructions: sampler
-subtexel weight precision can cause recurrence errors, especially at small radii.
-Initialization uses exact texture loads. Boundaries
-clamp to the edge; sums and intermediate textures use 32-bit floats.
+This however cost in performance, since now during transition regions (blur sizes
+15..18, 30..36, 70..72 etc.) there are two Gaussian blurs performed and their
+result is blended. If the X/Y radii are different, we might need to evaluate
+three Gaussian blurs in fact, and blend between them.
 
-**Iteratons (ryg)** under **Blur Mode** selects 1–5 boxes per axis (default 3), enabled only
-for this method. Each box’s exact discrete variance is matched to
-`(radius / 3)² / count`, so increasing count changes the approximation’s shape
-while preserving its variance. Zero-radius axes are skipped. The benchmark
-uses the selected count, records it in SVG metadata, and plots Ryg in teal
-before Smol Gaussian. Its scanline dependencies limit GPU parallelism, so
-performance should be judged using the benchmark rather than assumed from
-its low sample count. Initialization still costs O(box radius) per scanline.
+In my testing, this brought pretty much no visual difference, but cost in
+performance and made the implementation more complex. So eventually this was discarded.
+</details>
 
-### Smol Gaussian
-
-The comparison here is with this playground’s adaptation of Skia’s GPU blur
-path, not every blur implementation in Skia. Both use
-downsample–Gaussian–upsample, independent X/Y scales, preserved clamp-edge
-borders, and bilinear-paired Gaussian taps. Those are shared techniques, not
-Smol additions.
-
-| Choice | Skia adaptation here | Smol Gaussian now |
-| --- | --- | --- |
-| Working resolution | Halving steps plus a fractional final scale; sigma at most 4 | Ceil-halved levels; advance at working sigma 6 |
-| Reduction filter | Bilinear resampling | Pixel-area integration for odd sizes; eligible exact halves fused into 4× reductions |
-| Gaussian width | Requested sigma scaled to working resolution | Subtract estimated reduction and reconstruction variance first |
-| Gaussian support | Truncate at 3 sigma; small 2D kernels can use one pass | Always separable; taper from 3 to 4 sigma, capped at 25 reads per axis |
-| Reconstruction | Bilinear | Bilinear up to 2× enlargement per axis, cubic B-spline beyond |
-| Level crossfade | None | None; tried and removed |
-
-Smol’s main quality-oriented additions are area reduction, approximate variance
-compensation, and cubic reconstruction. Tap tapering softens changes when
-Gaussian support grows. The level policy is a different quality/cost choice,
-while 4× fusion is a performance optimization. These are established building
-blocks assembled differently, not a fundamentally new blur family or proof that
-Smol is universally better.
+Related work for all of this:
+- Skia [SkImageFilterTypes.cpp](https://skia.googlesource.com/skia/+/15a9437eec87/src/core/SkImageFilterTypes.cpp), as mentioned above.
+- Fabian Giesen, ["Gaussian blur kernels" on gdalgorithms](https://sourceforge.net/p/gdalgorithms/mailman/message/23077758/) list (2009): low-pass filter,
+  blur at lower resolution, then upsample. He suggests bilinear upsampling is good enough, however
+  in my tests very bright (HDR) blurred objects show bilinear "slope steps",
+  so I used cubic.
+- Intel, "[An Investigation of Fast Real-Time GPU-Based Image Blur Algorithms](https://www.intel.com/content/www/us/en/developer/articles/technical/an-investigation-of-fast-real-time-gpu-based-image-blur-algorithms.html)"
+  (2014) has "Working in Lower Resolution" section, but with not much details at when you would switch to it,
+  or how to handle animated blur radius.
+- GPU Gems 2, Chapter 20, "[Fast Third-Order Texture Filtering](https://developer.nvidia.com/gpugems/gpugems2/part-iii-high-quality-rendering/chapter-20-fast-third-order-texture-filtering)"
+  has a trick for cubic B-spline filtering using bilinear samples, which is what I used
+  here in reconstruction part.
 
 
-Radius maps approximately to three Gaussian standard deviations, like the existing
-Gaussian mode. Each axis reduces independently to keep the working sigma small;
-a zero-radius axis keeps its original resolution and is not filtered. Exact 2×
-downsampling uses one bilinear sample, including when only one axis is reduced;
-odd-sized reductions integrate pixel areas to preserve bright points. The residual
-Gaussian compensates approximately for reduction and reconstruction variance.
-For an axis reduced by a factor `s`, its working sigma is
-`sqrt(max(0, targetSigma² - reductionVariance - reconstructionVariance)) / s`.
-The variance terms are measured in original-image pixels squared. This avoids
-adding a full-width Gaussian on top of blur already introduced by resizing;
-resampling phase and boundary effects make the compensation approximate.
+### Dual Kawase
 
-Each reduced axis has a one-texel border on both sides. Reduction preserves the
-source edge/corner values there instead of extending averaged interior pixels;
-this avoids bright interiors contaminating the clamped boundary at large radii.
-The other axis still integrates its footprint along each edge. Padding is carried
-through every reduction and filtered with the image, then excluded from the
-logical dimensions used for sigma, level selection, and reconstruction coordinates.
-Unreduced axes need no padding. This follows the same boundary-preservation idea
-as Skia, while retaining the area reductions and reconstruction filters below.
-For example, an 8×5 logical level occupies a 10×7 texture when both axes reduce.
-This adds border pixels and coordinate calculations, but no additional render
-passes; exact 2× reductions still use one bilinear sample per output pixel.
+This project also implements an extended version of Dual Kawase. See Marius Bjørge,
+[Bandwidth-Efficient Rendering](https://community.arm.com/cfs-file/__key/communityserver-blogs-components-weblogfiles/00-00-00-20-66/siggraph2015_2D00_mmg_2D00_marius_2D00_notes.pdf) (SIGGRAPH 2015),
+also explanation in [this blog post](https://blog.frost.kiwi/dual-kawase/#dual-kawase-blur).
+The original uses equal horizontal/vertical blur ammounts, and only supports a discrete "number of blur pyramid levels"
+control, not a continuous "blur radius" setting. 
 
-Eligible pairs of exact 2× reductions are fused into one 4× reduction per
-reduced axis. Four bilinear reads cover a 4×4 footprint, or two cover a 4×1
-footprint for a single-axis reduction. The planner works from the source forward
-to eliminate the largest intermediates first. It follows a single reduction path
-and requires each reduced source dimension to be exactly divisible by four;
-odd-size steps keep the original area filter. The preserved borders,
-working-resolution choices, and variance calculation stay the same. The fused
-filter matches two exact halves apart from filtering and intermediate rounding.
+For arbitrary blur sizes: blend between neighboring discrete blur levels, similar to
+obs-composite-blur](https://github.com/FiniteSingularity/obs-composite-blur).
+lend using the fractional position between steps
+remapped with `t * (2 + t) / 3`, this makes it feel a bit nicer than just a linear blend.
 
-For example, at radius X=Y=1000, 1920×1080 starts with
-`1920×1080 → 480×270 → 240×135`, skipping the 960×540 intermediate.
-At radius X=Y=500, 3840×2160 starts with two fused steps:
-`3840×2160 → 960×540 → 240×135`. These are logical sizes, excluding padding.
-Each fusion removes one render pass and its intermediate write/read; actual
-speedup depends on the GPU and the rest of the blur.
-
-Measurements showed substantial gains from 4× reduction on RTX 3080 Ti and Intel
-Xe, and no noticeable benefit or regression on M4 Max. The difference might also
-involve Chrome’s Windows versus macOS GPU backends; these measurements do not
-isolate hardware from platform effects. Eligible 4× reductions are now always
-enabled, and the comparison checkbox has been removed.
-
-Reconstruction chooses per axis: bilinear for enlargement up to 2× (including
-odd-sized half-resolution images), positive cubic B-spline for coarser levels.
-This needs one bilinear sample when both axes use bilinear, two when only one
-needs cubic, and four when both do. Cubic removes coarse-grid slope
-discontinuities without ringing around HDR highlights. Variance compensation
-follows the chosen filter; unreduced axes preserve sharp detail. Filter choice
-depends on the working image dimensions. An `ALL_BILINEAR` WebGPU pipeline
-constant specializes reconstruction when the working image uses bilinear on both
-axes; other draws use the general hybrid shader. Both variants are created
-during initialization.
-
-Gaussian samples are paired using bilinear filtering, with at most 25 texture
-reads per pixel per axis. Textures and uniform buffers are reused. A single reduction
-path reduces both axes together, then the remaining axis. Reconstruction writes the
-full-resolution output once. When no resizing is needed, the final
-Gaussian pass writes directly to the output and reconstruction is skipped.
-
-Each axis switches to the next working level at sigma 6 in that level's
-texels (`sigma = radius / 3`, divided by the actual reduction scale).
-There is one Gaussian result and one reconstruction, with no level blending.
-Kernel tails still taper smoothly as the tap count changes. Resampling remains
-an approximation with some phase-dependent shape variation.
-
-#### Tried idea: crossfading working resolutions
-
-We tried blending neighboring resolutions to hide level switches. In video
-comparisons, including a small image exported without downscaling, the benefit
-was barely visible, if at all. Extra runtime cost in transition regions and
-code complexity were not worth it, so this was removed along with its checkbox.
-This is an observation about our tested images, not a guarantee for every input.
-
-For anyone revisiting it: start a smoothstep fade at working sigma 5 and finish
-at 6, then retire the finer level. With exact halves this gives radius ranges
-15–18, 30–36, 60–72, etc.; use actual scale ratios for odd dimensions. Both
-resolutions target the **same requested sigma**, each with its own reduction
-and reconstruction variance compensation, unlike Dual Kawase's interpolation
-between different blur widths. Reconstruct each result directly to the output
-grid to avoid adding an intermediate resize that disappears at the boundary.
-For independent axis fractions `tx, ty`, triangular weights are
-`1-max(tx,ty)` for the base, `abs(tx-ty)` for the neighbor advancing the axis
-with the larger fraction, and `min(tx,ty)` for the neighbor advancing both.
-This needs up to three Gaussian results, or two for matching fractions.
-Share canonical reduction prefixes, reducing both axes together first; 4×
-fusion must preserve any intermediate needed by an endpoint or branch.
-Each result generally adds horizontal and vertical Gaussian passes, plus
-extra reconstruction samples and texture bindings. The current implementation
-keeps only one result, the original sigma-6 level selection, and eligible 4×
-fusions along its single path.
-
-Related work for the building blocks:
-
-- Fabian Giesen, [Gaussian blur kernels (2009)](https://sourceforge.net/p/gdalgorithms/mailman/message/23077758/):
-  low-pass filtering before downsampling, a main blur at reduced resolution,
-  and reconstruction afterward. His warning about thin objects flickering when
-  downsampling skips samples motivates careful reduction, though his suggested
-  prefilters differ from our area integration.
-- Cornell CS5625, [Apply blur to mipmap levels (2022)](https://www.cs.cornell.edu/courses/cs5625/2022sp/assignments/pipeline.html#323-apply-blur-to-mipmap-levels):
-  an explicit recipe to downsample by `2^k`, blur with sigma `sigma / 2^k`, and
-  upsample. This describes the basic structure of the working image before our
-  variance compensation. Its bloom merge combines different blur widths,
-  rather than alternative resolutions of the same target width.
-- Intel, [An Investigation of Fast Real-Time GPU-Based Image Blur Algorithms](https://www.intel.com/content/www/us/en/developer/articles/technical/an-investigation-of-fast-real-time-gpu-based-image-blur-algorithms.html),
-  **Working in Lower Resolution**: downsample, apply a smaller Gaussian, then upscale.
-- Sigg and Hadwiger, [GPU Gems 2, Chapter 20: Fast Third-Order Texture Filtering](https://developer.nvidia.com/gpugems/gpugems2/part-iii-high-quality-rendering/chapter-20-fast-third-order-texture-filtering):
-  cubic B-spline reconstruction using paired hardware-linear samples.
-- Bjørge, [Bandwidth-Efficient Rendering, SIGGRAPH 2015](https://community.arm.com/cfs-file/__key/communityserver-blogs-components-weblogfiles/00-00-00-20-66/siggraph2015_2D00_mmg_2D00_marius_2D00_notes.pdf):
-  filtering across multiple resolutions. Its mixed-resolution pipeline is distinct
-  from the same-target crossfade experiment recorded above.
-
-These sources explain individual techniques, not the exact Smol Gaussian
-combination implemented in this playground.
+For independent X/Y blur radii: when the smaller blur radius is reached, we stop
+urther reductions along that axis. For the between-levels blend above, we might need
+to blend between three different blurred results.
 
 ### Skia Gaussian
 
-Adapted from Google Skia revision `da51f0d60e` (this is a WebGPU re-implementation
-of the algorithm, not a Skia wrapper).
-The relevant source is [SkImageFilterTypes.cpp](https://github.com/google/skia/blob/da51f0d60e/src/core/SkImageFilterTypes.cpp)
-(`FilterResult::rescale` / `Builder::blur`) and
-[SkBlurEngine.cpp](https://github.com/google/skia/blob/da51f0d60e/src/core/SkBlurEngine.cpp)
-(`SkShaderBlurAlgorithm`).
+This is what conceptually is closest to "Smol Gaussian". Implementation here
+is just a WebGPU re-implementation of relevant parts of Skia `SkImageFilterTypes.cpp`, as it
+was in revision `15a9437eec87` (2026 Sep). Basic algorithm is:
 
-- Radius maps to sigma = radius / 3; sigma at or below 0.03 bypasses that axis.
-- Each axis reduces independently to a working sigma of at most 4. Intermediate
-  steps halve the scale; the last step uses the remaining fractional scale.
-  Skia's near-identity final-step collapse is preserved.
-- Logical bounds remain fractional and scaling is centered. A one-pixel border
-  preserves clamped edge/corner values through downsampling, including odd sizes.
-- The normalized Gaussian has radius ceil(3 × sigma). Small 2D kernels (up to
-  28 samples) use one pass; others use separable, bilinear-paired 1D taps.
-- A single bilinear upscale reconstructs the result. There is no variance
-  compensation, cubic reconstruction, or tap taper. Neither current method
-  crossfades levels.
-  This deliberately retains Skia's radius-dependent approximation changes.
+- Each axis indepdendently downscales to a working sigma `<= 4`. Intermediate steps
+  halve the scale, and the last step uses the remaining fractional scale.  
+- A one pixel border around intermediate steps preserves clamped edge colors.
+- Final Gaussian pass has radius of `ceil(sigma * 3)`. A single direct convolution,
+  or separable bilinear-paired filter samples is used depending on size.
+- Final result is bilinearly upscaled to original resolution.
 
-Only whole-image blur with clamped edges is implemented. The existing HDR
-RGBA32F texture format is retained, whereas the native Metal reference uses
-RGBA16F. Half-float rounding and GPU sampler precision mean results are not
-bit-identical. Temporary textures and uniforms are reused, with the texture pool
-bounded to the current pass chain rather than every size visited during animation.
+### "Fast Gaussian" (from Blender 5.2)
 
-### Dual Kawase interpolation
+Blender's compositor blur node got a "Fast Gaussian" mode back in 2008 (v2.46)
+in [2a2453d3](https://projects.blender.org/blender/blender/commit/2a2453d3),
+which however built upon earlier implemented `IIR_Gauss` functionality for defocus
+blur node (2006, v2.43, commit [e61dec07](https://projects.blender.org/blender/blender/commit/e61dec07)).
 
-Dual Kawase is the main focus of this playground. The basic algorithm works well;
-the implementation extends it in two ways:
+This builds upon "Recursive Gaussian Filtering", which if you're just a programmer
+but not familiar with signal processing terminology, is *quite a confusing* name.
+You'd think a recursive gaussian would be something about building like several smaller versions
+and somehow combining them, right? Haha nope, not at all, "recursive filter" in signal processing
+just means that the filter uses some of the previous outputs.
 
-- **Arbitrary blur sizes:** between discrete blur steps, linearly blend the
-  previous and next blur amounts using the fractional position between steps
-  remapped with `t * (2 + t) / 3`. This compensates for blending kernel variance
-  rather than width, making blur growth more even between doubling steps.
-  Radii are not rounded before
-  interpolation, and the filters use the normal discrete-step sampling offsets.
-- **Independent X/Y blur radii:** interpolate up to three neighboring discrete
-  blur results, using triangles in the X/Y radius grid. At discrete radii,
-  the corresponding kernel is used directly; neighboring triangles share
-  their boundary results.
+Anyway, the "fast" part is due to filter construction that is basically the same cost,
+no matter the blur radius. Original code in Blender seeingly was built
+on one such algorithm, from Young, van Vliet & van Ginkel, “Recursive Gabor Filtering” (2000)
+paper. Many years later, in 2024 (blender 4.2.0, commit [382131fe](https://projects.blender.org/blender/blender/commit/382131fe))
+Omar remade this algorithm to have both CPU and GPU
+code paths, and to avoid double precision. And it was built on a handful of papers, curiously
+enough an *earlier* paper by Young, van Vliet et al. "Recursive Gaussian derivative filters" (1998),
+another paper Deriche "Recursively implementating the Gaussian and its derivatives" (1993), and some more.
 
-For equal X/Y radii, only two isotropic endpoints contribute. Their shared
-downsampling and upsampling run once, with one extra down/up pair and a blend
-at the smallest shared level. Anisotropic interpolation also shares pyramid work and blends
-before the common upsampling, but can require additional passes. Interpolation
-is continuous; its slope can change at triangle and discrete-step boundaries.
-Interpolation uses a constant blend weight for all RGBA channels, preserving alpha.
+Anyhoo, in this project there's a WebGPU re-implementation of Blender 5.2 "Fast Gaussian" state (mostly `recursive_gaussian_blur.cc`),
+which is fourth order Deriche formulation for radius under 96, and Van Vliet formulation for larger radius.
 
-The remapping can be motivated by assuming neighboring kernel widths are `r`
-and `2r`. Variance interpolation gives a weight of
-`((r * (1 + t))² - r²) / ((2r)² - r²) = t * (2 + t) / 3`.
-Actual Kawase kernels only approximately follow this model, and the first
-interval (radius 0 to 6) uses the same remapping as a heuristic. The radius scale
-is an approximate visual match to Gaussian blur, not an exact sigma calibration.
+The algorithms are more or less constant work independent of the blur radius, which is very nice. However, they are also from
+25+ years ago, and are not "embarrasingly parallel" that would fit a GPU (or even a many-core CPU) very well. So despite the
+name, they may or might not be very _fast_ :)
 
-For remapped X/Y fractions `tx` and `ty`, the three weights are
-`1 - max(tx, ty)`, `abs(tx - ty)`, and `min(tx, ty)`. The middle endpoint advances
-the axis with the larger fraction; the other two advance neither or both.
-These nonnegative weights sum to one and agree along shared triangle edges.
-Blending before the common upsample suffix is valid because that fixed filter
-is linear: `U(sum(w_i * image_i)) = sum(w_i * U(image_i))`. This requires the
-same grids and sampling path for the shared suffix, including on odd-sized images.
+They also have some ringing artifacts, which are not that much noticeable in regular colors, but with very bright HDR highlights,
+blurred result can have halos or negative colors, which is not great.
 
-### Performance
+
+### Ryg Blur
+
+I'm calling this "Ryg Blur" due to Fabian Giesen's [Fast blurs 1](https://fgiesen.wordpress.com/2012/07/30/fast-blurs-1/)
+and [Fast blurs 2](https://fgiesen.wordpress.com/2012/08/01/fast-blurs-2/) blog posts, which nicely
+described the whole idea, including how exactly to handle fractional samples at the ends,
+and how trivially that extends to a compute shader implementation.
+
+However the idea itself is "repeated box convolution", and has been around for ages, e.g.
+Heckbert "[Fun With Gaussians](https://www.researchgate.net/publication/2313072_Fun_With_Gaussians)" (1985)
+talk about it in pages 11-12.
+
+> "convolution of a 500x500 image with a 35x35 kernel would take over an hour
+> with 2-D convolution, but only 4 minutes with two 1-D convolutions" where he's
+> talking about a separable Gaussian filter. Only four minutes to blur a 500x500
+> image, imagine that! Computers have gotten quite a bit faster, eh.
+
+Anyway, this implementation is basically fixed cost independent of blur size,
+and uses two bilinear samples for fractional box endpoint updates. Number of iterations
+control is for how many times this box convolution should be done (1: box filter, 2: tent filter,
+3 and up: approaching Gaussian). It is very simple to implement, however not the fastest.
+Amount of paralellism (parallel over rows or columns) is nowhere near enough to feed modern
+GPUs, and multiple passes over the full size image incur a lot of memory traffic.
+
+## Performance
 
 Benchmark checkboxes select which methods to measure (all selected by default).
 Deselected methods are skipped; remaining methods retain their chart colors and
@@ -326,6 +203,13 @@ and batch sizes are embedded in the SVG metadata. Cancel stops after the current
 batch; the original blur settings are restored. **Render Video** exports video
 without reporting a benchmark time.
 
+Benchmark methods stop at the first completed warm-up, calibration, or measured
+per-frame timing above 1500 ms, skipping that radius on subsequent sweeps and
+all larger radii for that method. Other methods continue. The SVG line ends at
+the triggering radius; if necessary, that endpoint uses the warm-up/calibration
+observation, recorded in metadata along with the cutoff. This cannot prevent a
+device timeout if the first slow render itself exceeds the driver limit.
+
 The historical measurements below used the previous video-export timer and are
 not directly comparable to the dedicated benchmark.
 
@@ -341,17 +225,25 @@ all on Chrome browser:
 |Skia             |  1.47 |  1.15 |   3.58 |
 |Dual Kawase      |  1.72 |  1.23 |   4.89 |
 
+## Code layout
 
-### Features
+`index.html` contains the UI, image loading, and rendering orchestration.
+Blur shaders, pipelines, and algorithm helpers live in `js/`:
 
-- Drag & drop or browse for images (PNG/JPG/EXR).
-- Adjustable blur radius (X/Y can be locked or independent).
-- Inspect the source, intermediate textures, or final output with **Display Texture**.
-- **Animate** loops an eight-second radius sweep, respecting the X/Y lock.
-- **Render Video** exports an eight-second, 60 fps H.264 MP4 using WebCodecs,
-  reduced to 960px on the longer axis. Blur itself stays at the image resolution.
+- `separable-blur.js`: Box, Tent, and Gaussian; Fast Gaussian also uses this for small radii.
+- `smol-gaussian.js`: Smol Gaussian.
+- `ryg-blur.js`: repeated fractional box filters evaluated with moving sums.
+- `dual-kawase.js`: Dual Kawase.
+- `fast-gaussian.js` and `skia-gaussian.js`: Fast and Skia Gaussian.
+- `gpu-helpers.js`: shared fullscreen vertex shader, GPU resource helpers, and texture cache.
+- `video-export.js`: WebCodecs H.264 encoding and a minimal MP4 writer.
+- `exrloader.js` and `fflate.js`: EXR decoding and decompression.
 
-### External code
+The files use classic scripts with shared globals; GPU helpers load before the
+blur implementations. Most pipelines are initialized after device creation;
+Fast Gaussian compute pipelines are created on first use.
+
+## External code
 
 - `js/skia-gaussian.js` adapts Skia algorithms (Google LLC, BSD-3-Clause);
   see `js/skia-LICENSE.txt`.
@@ -364,10 +256,3 @@ all on Chrome browser:
   which itself is adapted from [tinyexr](https://github.com/syoyo/tinyexr).
 - `js/fflate.js` is gzip/deflate decoder needed for EXR loading,
   from [fflate](https://101arrowz.github.io/fflate/).
-
-Benchmark methods stop at the first completed warm-up, calibration, or measured
-per-frame timing above 1500 ms, skipping that radius on subsequent sweeps and
-all larger radii for that method. Other methods continue. The SVG line ends at
-the triggering radius; if necessary, that endpoint uses the warm-up/calibration
-observation, recorded in metadata along with the cutoff. This cannot prevent a
-device timeout if the first slow render itself exceeds the driver limit.
