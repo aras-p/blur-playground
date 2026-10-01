@@ -31,7 +31,7 @@ sample files with a single click in the page.
 
 ## Blur Modes
 
-## Smol Gaussian
+### Smol Gaussian
 
 "Downsampled" Gaussian blur: downsample to a working resolution (which could be different
 per axis), apply a small separable Gaussian there, reconstruct to full resolution image.
@@ -99,16 +99,16 @@ Related work for all of this:
 This project also implements an extended version of Dual Kawase. See Marius Bjørge,
 [Bandwidth-Efficient Rendering](https://community.arm.com/cfs-file/__key/communityserver-blogs-components-weblogfiles/00-00-00-20-66/siggraph2015_2D00_mmg_2D00_marius_2D00_notes.pdf) (SIGGRAPH 2015),
 also explanation in [this blog post](https://blog.frost.kiwi/dual-kawase/#dual-kawase-blur).
-The original uses equal horizontal/vertical blur ammounts, and only supports a discrete "number of blur pyramid levels"
+The original uses equal horizontal/vertical blur amounts, and only supports a discrete "number of blur pyramid levels"
 control, not a continuous "blur radius" setting. 
 
 For arbitrary blur sizes: blend between neighboring discrete blur levels, similar to
-obs-composite-blur](https://github.com/FiniteSingularity/obs-composite-blur).
-lend using the fractional position between steps
+[obs-composite-blur](https://github.com/FiniteSingularity/obs-composite-blur).
+Blend using the fractional position between steps
 remapped with `t * (2 + t) / 3`, this makes it feel a bit nicer than just a linear blend.
 
 For independent X/Y blur radii: when the smaller blur radius is reached, we stop
-urther reductions along that axis. For the between-levels blend above, we might need
+further reductions along that axis. For the between-levels blend above, we might need
 to blend between three different blurred results.
 
 ### Skia Gaussian
@@ -117,7 +117,7 @@ This is what conceptually is closest to "Smol Gaussian". Implementation here
 is just a WebGPU re-implementation of relevant parts of Skia `SkImageFilterTypes.cpp`, as it
 was in revision `15a9437eec87` (2026 Sep). Basic algorithm is:
 
-- Each axis indepdendently downscales to a working sigma `<= 4`. Intermediate steps
+- Each axis independently downscales to a working sigma `<= 4`. Intermediate steps
   halve the scale, and the last step uses the remaining fractional scale.  
 - A one pixel border around intermediate steps preserves clamped edge colors.
 - Final Gaussian pass has radius of `ceil(sigma * 3)`. A single direct convolution,
@@ -138,19 +138,19 @@ and somehow combining them, right? Haha nope, not at all, "recursive filter" in 
 just means that the filter uses some of the previous outputs.
 
 Anyway, the "fast" part is due to filter construction that is basically the same cost,
-no matter the blur radius. Original code in Blender seeingly was built
+no matter the blur radius. Original code in Blender seemingly was built
 on one such algorithm, from Young, van Vliet & van Ginkel, “Recursive Gabor Filtering” (2000)
 paper. Many years later, in 2024 (blender 4.2.0, commit [382131fe](https://projects.blender.org/blender/blender/commit/382131fe))
 Omar remade this algorithm to have both CPU and GPU
 code paths, and to avoid double precision. And it was built on a handful of papers, curiously
 enough an *earlier* paper by Young, van Vliet et al. "Recursive Gaussian derivative filters" (1998),
-another paper Deriche "Recursively implementating the Gaussian and its derivatives" (1993), and some more.
+another paper Deriche "Recursively implementing the Gaussian and its derivatives" (1993), and some more.
 
 Anyhoo, in this project there's a WebGPU re-implementation of Blender 5.2 "Fast Gaussian" state (mostly `recursive_gaussian_blur.cc`),
 which is fourth order Deriche formulation for radius under 96, and Van Vliet formulation for larger radius.
 
 The algorithms are more or less constant work independent of the blur radius, which is very nice. However, they are also from
-25+ years ago, and are not "embarrasingly parallel" that would fit a GPU (or even a many-core CPU) very well. So despite the
+25+ years ago, and are not "embarrassingly parallel" that would fit a GPU (or even a many-core CPU) very well. So despite the
 name, they may or might not be very _fast_ :)
 
 They also have some ringing artifacts, which are not that much noticeable in regular colors, but with very bright HDR highlights,
@@ -177,7 +177,7 @@ Anyway, this implementation is basically fixed cost independent of blur size,
 and uses two bilinear samples for fractional box endpoint updates. Number of iterations
 control is for how many times this box convolution should be done (1: box filter, 2: tent filter,
 3 and up: approaching Gaussian). It is very simple to implement, however not the fastest.
-Amount of paralellism (parallel over rows or columns) is nowhere near enough to feed modern
+Amount of parallelism (parallel over rows or columns) is nowhere near enough to feed modern
 GPUs, and multiple passes over the full size image incur a lot of memory traffic.
 
 ## Performance
@@ -193,7 +193,7 @@ Ryzen 5950X, RTX 3080Ti, Windows:
 ![rtx3080 chart](/charts/rtx-benchmark-3840x2160.svg?raw=true "rtx3080 chart")
 
 Core i7-1185G7, Intel Iris Xe, Windows:
-![intel xe chart](/charts/xe-benchmark-3840x2160.svg?raw=true "intel xr chart")
+![intel xe chart](/charts/xe-benchmark-3840x2160.svg?raw=true "intel xe chart")
 
 
 ## Code layout
