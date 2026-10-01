@@ -40,7 +40,7 @@ objects (500 and 50 intensity in linear), here's the input with additional glare
 
 ### Smol Gaussian
 
-"Downsampled" Gaussian blur: downsample to a working resolution (which could be different
+"Downsampled" Gaussian blur that I call **Smol Gaussian**: downsample to a working resolution (which could be different
 per axis), apply a small separable Gaussian there, reconstruct to full resolution image.
 
 <img src="videos/blur_b_smol_gaussian.avif" width="400">
@@ -81,6 +81,9 @@ Related work for all of this:
   has a trick for cubic B-spline filtering using bilinear samples, which is what I used
   here in reconstruction part.
 
+All of this is not particularly novel or insightful, I consider it to be perhaps a handful of
+small quality tweaks compared to Skia blur.
+
 <details>
 <summary>Discarded idea - crossfading working resolutions:</summary>
 
@@ -105,7 +108,7 @@ performance and made the implementation more complex. So eventually this was dis
 
 ### Dual Kawase
 
-This project also implements an extended version of Dual Kawase. See Marius Bjørge,
+This project also implements an extended version of **Dual Kawase**. See Marius Bjørge,
 [Bandwidth-Efficient Rendering](https://community.arm.com/cfs-file/__key/communityserver-blogs-components-weblogfiles/00-00-00-20-66/siggraph2015_2D00_mmg_2D00_marius_2D00_notes.pdf) (SIGGRAPH 2015),
 also explanation in [this blog post](https://blog.frost.kiwi/dual-kawase/#dual-kawase-blur).
 The original uses equal horizontal/vertical blur amounts, and only supports a discrete "number of blur pyramid levels"
@@ -128,7 +131,7 @@ highlights, due to how blending happens between discrete blur levels.
 ### Skia Gaussian
 
 This is what conceptually is closest to "Smol Gaussian". Implementation here
-is just a WebGPU re-implementation of relevant parts of Skia `SkImageFilterTypes.cpp`, as it
+is just a WebGPU re-implementation of relevant parts of **[Skia](https://skia.org/)** `SkImageFilterTypes.cpp`, as it
 was in revision `15a9437eec87` (2026 Sep). Basic algorithm is:
 
 - Each axis independently downscales to a working sigma `<= 4`. Intermediate steps
@@ -150,7 +153,7 @@ in [2a2453d3](https://projects.blender.org/blender/blender/commit/2a2453d3),
 which however built upon earlier implemented `IIR_Gauss` functionality for defocus
 blur node (2006, v2.43, commit [e61dec07](https://projects.blender.org/blender/blender/commit/e61dec07)).
 
-This builds upon "Recursive Gaussian Filtering", which if you're just a programmer
+This builds upon "**Recursive Gaussian** Filtering", which if you're just a programmer
 but not familiar with signal processing terminology, is *quite a confusing* name.
 You'd think a recursive gaussian would be something about building like several smaller versions
 and somehow combining them, right? Haha nope, not at all, "recursive filter" in signal processing
@@ -185,7 +188,7 @@ and [Fast blurs 2](https://fgiesen.wordpress.com/2012/08/01/fast-blurs-2/) blog 
 described the whole idea, including how exactly to handle fractional samples at the ends,
 and how trivially that extends to a compute shader implementation.
 
-However the idea itself is "repeated box convolution", and has been around for ages, e.g.
+However the idea itself is "**repeated box convolution**", and has been around for ages, e.g.
 Heckbert "[Fun With Gaussians](https://www.researchgate.net/publication/2313072_Fun_With_Gaussians)" (1985)
 talk about it in pages 11-12.
 
@@ -205,7 +208,7 @@ GPUs, and multiple passes over the full size image incur a lot of memory traffic
 
 ### Regular Gaussian blur
 
-A simple separable Gaussian blur, mostly included as a reference. This is one algorithm that
+A simple **separable Gaussian** blur, mostly included as a reference. This is one algorithm that
 becomes impractical at very large blur radii, since the cost scales linearly with radius.
 This particular implementation cuts off the kernel at sigma=3 (matches behavior of Blender),
 which is fine for regular image content, but for very bright HDR highlights it makes
