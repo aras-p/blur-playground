@@ -1,4 +1,5 @@
-// Gaussian convolution; also used by Fast Gaussian at small radii.
+/* A simple separable Gaussian blur, included as a reference. Cost scales
+ * linearly with radius. The kernel is cut off at sigma=3 (matches Blender) */
 
 /** @type {GPURenderPipeline} */
 let pip_separable = null;

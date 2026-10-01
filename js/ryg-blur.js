@@ -1,6 +1,14 @@
-// Extended box moving average, following Fabian Giesen's Fast blurs 1/2:
-// https://fgiesen.wordpress.com/2012/08/01/fast-blurs-2/
-// One invocation walks a scanline; two hardware-filtered samples update its running sum.
+/* "Ryg Blur": repeated box convolution, following Fabian Giesen's Fast blurs 1/2:
+ * https://fgiesen.wordpress.com/2012/07/30/fast-blurs-1/
+ * https://fgiesen.wordpress.com/2012/08/01/fast-blurs-2/
+ *
+ * Fixed cost independent of blur size, with two bilinear samples for
+ * fractional box endpoint updates. Iterations control how many times to do the
+ * convolution: 1 gives a box filter, 2 a tent filter, 3 and up approach Gaussian.
+ *
+ * One invocation walks a scanline; parallelism is only over rows or columns,
+ * and multiple passes over the full size image incur a lot of memory traffic. */
+
 let pip_ryg = null;
 const rygBuffers = [];
 

@@ -1,25 +1,29 @@
-/* Dual Kawase builds a pyramid with a five-sample downsample filter and an
- * eight-sample upsample filter. Working on progressively fewer pixels makes
- * large blurs cheap, but the basic pyramid only produces discrete blur widths.
- * Here radius selects neighboring fixed kernels; a weighted blend fills the
- * gaps. Independent X/Y choices form a cell, triangulated into at most three
- * endpoints so equal radii need only two isotropic kernels.
+/* Extended Dual Kawase, using a five-sample downsample filter and an eight-sample
+ * upsample filter. The original uses equal horizontal/vertical blur amounts,
+ * and only supports a discrete "number of blur pyramid levels" control.
  *
- * Endpoints share their downsample prefixes. They are brought back to a common
- * grid and blended there before the shared upsample suffix. Since that suffix
- * is linear, U(sum(w_i * image_i)) = sum(w_i * U(image_i)); this avoids separate
- * full-resolution reconstructions. Sampling paths and grids must match for
- * this rearrangement to preserve the result (up to floating-point rounding).
+ * For arbitrary blur sizes, blend between neighboring discrete blur levels,
+ * similar to https://github.com/FiniteSingularity/obs-composite-blur.
+ * The fractional position between steps is remapped with t * (2 + t) / 3,
+ * which makes it feel a bit nicer than just a linear blend.
+ * For independent X/Y radii, stop further reductions along an axis when its
+ * smaller blur radius is reached. Between levels, this can mean blending three
+ * different blurred results; equal radii only need two.
  *
- * Radius/3 is an approximate visual mapping to Gaussian-like blur sizes, not
- * a measured sigma. The resulting kernels are not Gaussian and can retain
- * pyramid structure, especially around isolated highlights or at small sizes.
+ * Endpoints share their downsample prefixes, are blended on a common grid,
+ * then use a shared upsample suffix. Since upsampling is linear, this avoids
+ * separate full-resolution reconstructions. Sampling paths and grids must match
+ * to preserve the result.
  *
- * Original down/up filters: Marius Bjorge, "Bandwidth-Efficient Rendering",
- * SIGGRAPH 2015, "Dual filtering". The radius mapping, triangular X/Y blending,
- * and shared-branch scheduling below extend that basic filter pyramid.
+ * Radius/3 is an approximate visual mapping, not a measured Gaussian sigma.
+ * The result kinda works, but smoothly animated radius does not "feel" smooth
+ * on HDR highlights, due to blending between discrete blur levels.
+ *
+ * Original filters: Marius Bjorge, "Bandwidth-Efficient Rendering" (SIGGRAPH 2015):
  * https://community.arm.com/cfs-file/__key/communityserver-blogs-components-weblogfiles/00-00-00-20-66/siggraph2015_2D00_mmg_2D00_marius_2D00_notes.pdf
+ * Also explained at https://blog.frost.kiwi/dual-kawase/#dual-kawase-blur.
  */
+
 
 /** @type {GPURenderPipeline} */
 let pip_dk_down = null;

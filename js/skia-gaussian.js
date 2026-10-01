@@ -1,8 +1,20 @@
 /*
- * Skia-style image blur, based on Google Skia da51f0d60e:
- * src/core/SkImageFilterTypes.cpp (rescale), SkBlurEngine.cpp (Gaussian kernels).
- * Simplified to a whole image with clamped edges, no crop/transform/tile modes.
+ * WebGPU re-implementation of relevant parts of Skia's GPU Gaussian blur:
+ * src/core/SkImageFilterTypes.cpp (rescale), SkBlurEngine.cpp (Gaussian kernels),
+ * based on Google Skia da51f0d60e (2026 Sep).
+ *
+ * Each axis independently downscales to a working sigma <= 4. Intermediate
+ * steps halve the scale, and the last step uses the remaining fractional scale.
+ * A one pixel border around intermediate steps preserves clamped edge colors.
+ * Final Gaussian pass has radius ceil(sigma * 3), using a single direct
+ * convolution or separable bilinear-paired filter samples depending on size.
+ * Final result is bilinearly upscaled to original resolution.
+ *
+ * Feels fine on regular LDR content, but very bright HDR highlights show aliasing
+ * and wobbling. Simplified to a whole image with clamped edges, no crop,
+ * transform or tile modes.
  */
+
 
 /* License of original code:
 

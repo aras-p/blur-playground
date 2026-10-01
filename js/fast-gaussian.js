@@ -1,7 +1,10 @@
 /* SPDX-FileCopyrightText: 2024 Blender Authors
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Port of Blender compositor recursive_gaussian_blur.cc,
+ * WebGPU re-implementation of Blender 5.2 compositor "Fast Gaussian": fourth
+ * order Deriche formulation for radius under 96, Van Vliet for larger radius.
+ *
+ * Port of recursive_gaussian_blur.cc,
  * cached_resources/intern/{deriche,van_vliet}_gaussian_coefficients.cc and
  * shaders/compositor_{deriche,van_vliet}_gaussian_blur{,_sum}.glsl.
  * Coefficients are evaluated in double precision, then uploaded as floats.

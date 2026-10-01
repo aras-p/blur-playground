@@ -1,30 +1,49 @@
-/* Smol Gaussian: a Gaussian approximation using downsampling, small separable
- * filters, and reconstruction, with independently selected working resolutions.
- * Each axis chooses its working resolution independently.
- * Reduction and reconstruction already add blur, so the working filter subtracts
- * their approximate variances before choosing its residual Gaussian sigma.
+/* "Smol Gaussian": downsample to a working resolution (which could be different
+ * per axis), apply a small separable Gaussian there, reconstruct to full
+ * resolution image.
  *
- * One working resolution per axis is filtered, then reconstructed directly
- * onto the final output grid. Level crossfading was tried and removed; see
- * readme.md for the experiment and reconstruction details.
+ * Similar to Skia's GPU Gaussian blur as of 2026 Sep: independent X/Y scaling,
+ * texture samples placed to use bilinear filtering, and a one pixel border on
+ * downsampled images that preserves original image edges. This way bright
+ * interiors do not overbright the result at large radius.
+ * Additions compared to Skia blur:
+ * - More correct pixel area integration when downsampling odd-sized images,
+ *   so isolated bright pixels do not flicker with sampling phase shifts.
+ * - Ceil-halved levels, with downsampling kicking in at sigma=6 (blur sizes
+ *   18, 36, 72, 144, ...), instead of continuous scaling to keep sigma under 4.
+ * - Subtract the variance introduced by downsampling and reconstruction from
+ *   the final Gaussian kernel.
+ * - Extend the kernel to sigma=4, tapering weights in sigma 3..4 to zero. This
+ *   reduces the "blur is cut off" with bright highlights and looks better when
+ *   radius is animated and the number of taps changes.
+ * - Use a cubic B-spline (fully positive, so no ringing) beyond 2x enlargement,
+ *   avoiding the slope discontinuities of bilinear reconstruction.
+ * - Combine pairs of exact 2x reductions into a single 4x reduction.
  *
- * Related work (building blocks, not a specification of this exact combination):
- * - Fabian Giesen, "Gaussian blur kernels" (2009): prefilter before reducing,
- *   blur at lower resolution, then reconstruct; skipping samples causes aliasing.
+ * One working resolution per axis is filtered and reconstructed directly onto
+ * the final output grid. Crossfading neighboring resolutions was tried, but
+ * brought pretty much no visual difference and cost in performance; see readme.md.
+ *
+ * Related work:
+ * - Skia, SkImageFilterTypes.cpp (FilterResult::Builder::blur and rescale):
+ *   https://skia.googlesource.com/skia/+/15a9437eec87/src/core/SkImageFilterTypes.cpp
+ * - Fabian Giesen, "Gaussian blur kernels" (2009): low-pass filter, blur at lower
+ *   resolution, then upsample. Bilinear upsampling shows slope steps on HDR here.
  *   https://sourceforge.net/p/gdalgorithms/mailman/message/23077758/
- * - Cornell CS5625, "Apply blur to mipmap levels" (2022): reduce by 2^k and use
- *   sigma/2^k. Its bloom merge mixes widths, not same-target resolution choices.
- *   https://www.cs.cornell.edu/courses/cs5625/2022sp/assignments/pipeline.html#323-apply-blur-to-mipmap-levels
- * - Intel, "An Investigation of Fast Real-Time GPU-Based Image Blur Algorithms",
- *   "Working in Lower Resolution": reduce, filter with a smaller kernel, upscale.
+ * - Intel, "An Investigation of Fast Real-Time GPU-Based Image Blur Algorithms"
+ *   (2014), "Working in Lower Resolution":
  *   https://www.intel.com/content/www/us/en/developer/articles/technical/an-investigation-of-fast-real-time-gpu-based-image-blur-algorithms.html
- * - Sigg & Hadwiger, GPU Gems 2, Chapter 20, "Fast Third-Order Texture Filtering":
- *   evaluate cubic B-splines with paired hardware-linear samples.
+ * - GPU Gems 2, Chapter 20, "Fast Third-Order Texture Filtering": cubic B-spline
+ *   filtering using bilinear samples, used here for reconstruction.
  *   https://developer.nvidia.com/gpugems/gpugems2/part-iii-high-quality-rendering/chapter-20-fast-third-order-texture-filtering
- * - Bjorge, "Bandwidth-Efficient Rendering", SIGGRAPH 2015: multi-resolution
- *   filtering. Its mixed-resolution pipeline is not our same-target crossfade.
+ * - Cornell CS5625, "Apply blur to mipmap levels" (2022): reduce by 2^k and use
+ *   sigma/2^k. Its bloom merge mixes widths, unlike same-target level crossfading.
+ *   https://www.cs.cornell.edu/courses/cs5625/2022sp/assignments/pipeline.html#323-apply-blur-to-mipmap-levels
+ * - Marius Bjorge, "Bandwidth-Efficient Rendering" (SIGGRAPH 2015): multi-resolution
+ *   filtering; its mixed-resolution pipeline differs from same-target crossfading.
  *   https://community.arm.com/cfs-file/__key/communityserver-blogs-components-weblogfiles/00-00-00-20-66/siggraph2015_2D00_mmg_2D00_marius_2D00_notes.pdf
  */
+
 
 /** @type {GPURenderPipeline} */
 let pip_smol_gaussian = null;
