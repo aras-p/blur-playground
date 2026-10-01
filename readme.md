@@ -29,6 +29,8 @@ sample files with a single click in the page.
   and produces a SVG file with the graphs. The result is displayed at the bottom of the page,
   and can be downloaded too.
 
+Live version: **https://aras-p.info/files/webgpu/2026-blur-playground/**
+
 ## Blur Modes
 
 In the videos below, blur radius is animated (increase X&Y together from 5 to 1000, decrease X&Y separately),
