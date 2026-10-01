@@ -198,32 +198,26 @@ Core i7-1185G7, Intel Iris Xe, Windows:
 
 ## Code layout
 
-`index.html` is the main file with UI, image loading, and main rendering logic.
-Individual blur implementations and some helpers are in `js/`:
+`index.html` is the main file, with UI, image loading, WebGPU setup, and main logic
+for everything. Actual blur algorithms and various helpers are under `js/`:
 
-- `separable-blur.js`: Box, Tent, and Gaussian; Fast Gaussian also uses this for small radii.
-- `smol-gaussian.js`: Smol Gaussian.
-- `ryg-blur.js`: repeated fractional box filters evaluated with moving sums.
-- `dual-kawase.js`: Dual Kawase.
-- `fast-gaussian.js` and `skia-gaussian.js`: Fast and Skia Gaussian.
-- `gpu-helpers.js`: shared fullscreen vertex shader, GPU resource helpers, and texture cache.
-- `video-export.js`: WebCodecs H.264 encoding and a minimal MP4 writer.
-- `exrloader.js` and `fflate.js`: EXR decoding and decompression.
+- `separable-blur.js`, `smol-gaussian.js`, `dual-kawase.js`,
+  `fast-gaussian.js`, `skia-gaussian.js`, `ryg-blur.js` are what their names suggest, duh.
+- `exrloader.js` and `fflate.js`: EXR decoding and decompression,
+- `video-export.js`: movie encoding (AV1 and H.264, a tiny MP4 writer),
+- `benchmark.js`: benchmark timing, SVG chart generation, the works,
+- `gpu-helpers.js`: misc. GPU related helpers.
 
-The files use classic scripts with shared globals; GPU helpers load before the
-blur implementations. Most pipelines are initialized after device creation;
-Fast Gaussian compute pipelines are created on first use.
+### External code
 
-## External code
-
-- `js/skia-gaussian.js` adapts Skia algorithms (Google LLC, BSD-3-Clause);
-  see `js/skia-LICENSE.txt`.
-
-- `js/fast-gaussian.js` is adapted from Blender compositor code
-  (Blender Authors, GPL-2.0-or-later); see its source header.
-
-- `js/exrloader.js` is EXR file loader, adapted from three.js
-  ([file link](https://github.com/mrdoob/three.js/blob/65bfbd8e51db/examples/jsm/loaders/EXRLoader.js))
-  which itself is adapted from [tinyexr](https://github.com/syoyo/tinyexr).
-- `js/fflate.js` is gzip/deflate decoder needed for EXR loading,
-  from [fflate](https://101arrowz.github.io/fflate/).
+- `js/skia-gaussian.js` is adaptation of Google Skia gaussian blur code
+  from `SkImageFilterTypes.cpp` and `SkBlurEngine.cpp` (2026 Sept, rev `da51f0d60e`).
+  Original is Copyright Google LLC, BSD-3-Clause license.
+- `js/fast-gaussian.js` is a port of Blender compositor blur node "Fast Gaussian" related
+  code, as it was in 2026 Sept. Original is Copyright 2024 Blender Authors,
+  GPL-2.0-or-later license.
+- `js/exrloader.js` is an EXR loader adapted from three.js
+  ([EXRLoader.js](https://github.com/mrdoob/three.js/blob/65bfbd8e51db/examples/jsm/loaders/EXRLoader.js)),
+  incorporating some code from [tinyexr](https://github.com/syoyo/tinyexr) and OpenEXR.
+- `js/fflate.js` is the bundled [fflate](https://101arrowz.github.io/fflate/)
+  compression library, used for EXR decompression.
