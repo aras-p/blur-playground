@@ -68,6 +68,19 @@ Additions compared to Skia blur are:
   of bilinear.
 - Pairs of exact 2x reductions are done as single 4x reduction as an optimization.
 
+Related work for all of this:
+- Skia [SkImageFilterTypes.cpp](https://skia.googlesource.com/skia/+/15a9437eec87/src/core/SkImageFilterTypes.cpp), as mentioned above.
+- Fabian Giesen, ["Gaussian blur kernels" on gdalgorithms](https://sourceforge.net/p/gdalgorithms/mailman/message/23077758/) list (2009): low-pass filter,
+  blur at lower resolution, then upsample. He suggests bilinear upsampling is good enough, however
+  in my tests very bright (HDR) blurred objects show bilinear "slope steps",
+  so I used cubic.
+- Intel, "[An Investigation of Fast Real-Time GPU-Based Image Blur Algorithms](https://www.intel.com/content/www/us/en/developer/articles/technical/an-investigation-of-fast-real-time-gpu-based-image-blur-algorithms.html)"
+  (2014) has "Working in Lower Resolution" section, but with not much details at when you would switch to it,
+  or how to handle animated blur radius.
+- GPU Gems 2, Chapter 20, "[Fast Third-Order Texture Filtering](https://developer.nvidia.com/gpugems/gpugems2/part-iii-high-quality-rendering/chapter-20-fast-third-order-texture-filtering)"
+  has a trick for cubic B-spline filtering using bilinear samples, which is what I used
+  here in reconstruction part.
+
 <details>
 <summary>Discarded idea - crossfading working resolutions:</summary>
 
@@ -88,19 +101,6 @@ three Gaussian blurs in fact, and blend between them.
 In my testing, this brought pretty much no visual difference, but cost in
 performance and made the implementation more complex. So eventually this was discarded.
 </details>
-
-Related work for all of this:
-- Skia [SkImageFilterTypes.cpp](https://skia.googlesource.com/skia/+/15a9437eec87/src/core/SkImageFilterTypes.cpp), as mentioned above.
-- Fabian Giesen, ["Gaussian blur kernels" on gdalgorithms](https://sourceforge.net/p/gdalgorithms/mailman/message/23077758/) list (2009): low-pass filter,
-  blur at lower resolution, then upsample. He suggests bilinear upsampling is good enough, however
-  in my tests very bright (HDR) blurred objects show bilinear "slope steps",
-  so I used cubic.
-- Intel, "[An Investigation of Fast Real-Time GPU-Based Image Blur Algorithms](https://www.intel.com/content/www/us/en/developer/articles/technical/an-investigation-of-fast-real-time-gpu-based-image-blur-algorithms.html)"
-  (2014) has "Working in Lower Resolution" section, but with not much details at when you would switch to it,
-  or how to handle animated blur radius.
-- GPU Gems 2, Chapter 20, "[Fast Third-Order Texture Filtering](https://developer.nvidia.com/gpugems/gpugems2/part-iii-high-quality-rendering/chapter-20-fast-third-order-texture-filtering)"
-  has a trick for cubic B-spline filtering using bilinear samples, which is what I used
-  here in reconstruction part.
 
 
 ### Dual Kawase
