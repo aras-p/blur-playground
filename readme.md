@@ -36,6 +36,8 @@ sample files with a single click in the page.
 "Downsampled" Gaussian blur: downsample to a working resolution (which could be different
 per axis), apply a small separable Gaussian there, reconstruct to full resolution image.
 
+<img src="videos/blur_b_smol_gaussian.avif" width="300">
+
 The algorithm is similar to Skia's GPU Gaussian blur as of 2026 Sep (`FilterResult::Builder::blur`
 and `FilterResult::rescale` in [SkImageFilterTypes.cpp](https://skia.googlesource.com/skia/+/15a9437eec87/src/core/SkImageFilterTypes.cpp)) - independent X/Y scaling, texture samples placed to use
 bilinear filtering, one pixel border on downsampled images that preserve the original
@@ -111,6 +113,11 @@ For independent X/Y blur radii: when the smaller blur radius is reached, we stop
 further reductions along that axis. For the between-levels blend above, we might need
 to blend between three different blurred results.
 
+<img src="videos/blur_b_dual_kawase.avif" width="300">
+
+The result kinda works, but does not "feel great" to me. Smoothly animated blur radius does not "feel" smooth on HDR
+highlights, due to how blending happens between discrete blur levels.
+
 ### Skia Gaussian
 
 This is what conceptually is closest to "Smol Gaussian". Implementation here
@@ -123,6 +130,11 @@ was in revision `15a9437eec87` (2026 Sep). Basic algorithm is:
 - Final Gaussian pass has radius of `ceil(sigma * 3)`. A single direct convolution,
   or separable bilinear-paired filter samples is used depending on size.
 - Final result is bilinearly upscaled to original resolution.
+
+<img src="videos/blur_b_skia_gaussian.avif" width="300">
+
+Skia blur feels just fine on regular LDR content, but on very bright HDR highlights, the aliasing and wobbling
+are quite apparent.
 
 ### "Fast Gaussian" (from Blender 5.2)
 
@@ -154,7 +166,9 @@ The algorithms are more or less constant work independent of the blur radius, wh
 name, they may or might not be very _fast_ :)
 
 They also have some ringing artifacts, which are not that much noticeable in regular colors, but with very bright HDR highlights,
-blurred result can have halos or negative colors, which is not great.
+blurred result can have halos or negative colors, which is not great. See:
+
+<img src="videos/blur_b_fast_gaussian.avif" width="300">
 
 
 ### Ryg Blur
@@ -179,6 +193,19 @@ control is for how many times this box convolution should be done (1: box filter
 3 and up: approaching Gaussian). It is very simple to implement, however not the fastest.
 Amount of parallelism (parallel over rows or columns) is nowhere near enough to feed modern
 GPUs, and multiple passes over the full size image incur a lot of memory traffic.
+
+<img src="videos/blur_b_ryg.avif" width="300">
+
+### Regular Gaussian blur
+
+A simple separable Gaussian blur, mostly included as a reference. This is one algorithm that
+becomes impractical at very large blur radii, since the cost scales linearly with radius.
+This particular implementation cuts off the kernel at sigma=3 (matches behavior of Blender),
+which is fine for regular image content, but for very bright HDR highlights it makes
+the blur feel like it "stops" abruptly. Smol Gaussian feels better in this regard!
+
+<img src="videos/blur_b_gaussian.avif" width="300">
+
 
 ## Performance
 
