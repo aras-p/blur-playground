@@ -182,48 +182,12 @@ GPUs, and multiple passes over the full size image incur a lot of memory traffic
 
 ## Performance
 
-Benchmark checkboxes select which methods to measure (all selected by default).
-Deselected methods are skipped; remaining methods retain their chart colors and
-Smol Gaussian remains last. Select at least one method before starting.
+![mac m4 chart](/charts/mac-benchmark-3840x2160.svg?raw=true "mac m4 chart")
 
-**Benchmark** measures Gaussian, Fast Gaussian, Dual Kawase, Skia Gaussian, Ryg
-Blur, and Smol Gaussian on the loaded image with equal X/Y radii, from 5 to 1000
-at approximately 1.4× spacing. After a warm-up sweep, it runs four sweeps and
-plots the minimum batch-average milliseconds per frame at each radius. Each
-batch waits for the WebGPU queue before and after timing; CPU command
-preparation, GPU execution, and GPU idle time are included. Display, UI updates,
-and video encoding are excluded. Batches target 30 ms using the warm-up
-estimate, with 1–128 renders per batch.
+![rtx3080 chart](/charts/rtx-benchmark-3840x2160.svg?raw=true "rtx3080 chart")
 
-The SVG is displayed directly below the image, with a Download SVG link. It has
-logarithmic axes and two-decimal timing labels. Progress updates at most every
-200 ms, outside the timed batches. Its
-Y axis starts at 0.05 ms, or lower when needed to show faster results. Raw samples
-and batch sizes are embedded in the SVG metadata. Cancel stops after the current
-batch; the original blur settings are restored. **Render Video** exports video
-without reporting a benchmark time.
+![intel xe chart](/charts/xe-benchmark-3840x2160.svg?raw=true "intel xr chart")
 
-Benchmark methods stop at the first completed warm-up, calibration, or measured
-per-frame timing above 1500 ms, skipping that radius on subsequent sweeps and
-all larger radii for that method. Other methods continue. The SVG line ends at
-the triggering radius; if necessary, that endpoint uses the warm-up/calibration
-observation, recorded in metadata along with the cutoff. This cannot prevent a
-device timeout if the first slow render itself exceeds the driver limit.
-
-The historical measurements below used the previous video-export timer and are
-not directly comparable to the dedicated benchmark.
-
-**Render Video** time in seconds, doing an animated radius sweep on a 1920x1080 input image,
-all on Chrome browser:
-
-| Scenario | Apple M4 Max | RTX 3080Ti, Windows | Intel Iris Xe, Windows |
-|----------|-------------:|------:|-------:|
-|No blur          |  1.41 |  0.98 |   2.71 |
-|Gaussian         | 19.52 | 15.47 | 151.07 |
-|Fast Gaussian    |  2.25 |  1.86 |  10.09 |
-|**Smol Gaussian**|  1.55 |  1.11 |   3.63 |
-|Skia             |  1.47 |  1.15 |   3.58 |
-|Dual Kawase      |  1.72 |  1.23 |   4.89 |
 
 ## Code layout
 
