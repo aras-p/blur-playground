@@ -182,17 +182,24 @@ GPUs, and multiple passes over the full size image incur a lot of memory traffic
 
 ## Performance
 
+All of the below are in Chrome browser. The timings finish any GPU work, start measuring,
+do the blur, finish GPU work again, end measuring. So this kinda measures "latency" of doing
+both CPU & GPU work parts.
+
+Apple M4 Max, macOS:
 ![mac m4 chart](/charts/mac-benchmark-3840x2160.svg?raw=true "mac m4 chart")
 
+Ryzen 5950X, RTX 3080Ti, Windows:
 ![rtx3080 chart](/charts/rtx-benchmark-3840x2160.svg?raw=true "rtx3080 chart")
 
+Core i7-1185G7, Intel Iris Xe, Windows:
 ![intel xe chart](/charts/xe-benchmark-3840x2160.svg?raw=true "intel xr chart")
 
 
 ## Code layout
 
-`index.html` contains the UI, image loading, and rendering orchestration.
-Blur shaders, pipelines, and algorithm helpers live in `js/`:
+`index.html` is the main file with UI, image loading, and main rendering logic.
+Individual blur implementations and some helpers are in `js/`:
 
 - `separable-blur.js`: Box, Tent, and Gaussian; Fast Gaussian also uses this for small radii.
 - `smol-gaussian.js`: Smol Gaussian.
