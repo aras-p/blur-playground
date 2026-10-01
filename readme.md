@@ -31,6 +31,8 @@ sample files with a single click in the page.
 
 Live version: **https://aras-p.info/files/webgpu/2026-blur-playground/**
 
+Blog post about all of this: **https://aras-p.info/blog/2026/10/01/Fast-blur-with-animated-radius/**
+
 ## Blur Modes
 
 In the videos below, blur radius is animated (increase X&Y together from 5 to 1000, decrease X&Y separately),
