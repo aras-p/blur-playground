@@ -69,7 +69,7 @@ Additions compared to Skia blur are:
 - Pairs of exact 2x reductions are done as single 4x reduction as an optimization.
 
 <details>
-<summary>Discarded idea: crossfading working resolutions</summary>
+<summary>Discarded idea - crossfading working resolutions:</summary>
 
 I tried blending neighboring resolutions to hide level switches. Idea was this:
 when the resolution that does the final blur changes, in theory you could have
