@@ -31,12 +31,19 @@ sample files with a single click in the page.
 
 ## Blur Modes
 
+In the videos below, blur radius is animated (increase X&Y together from 5 to 1000, decrease X&Y separately),
+and the input image is rotated during the animation loop. The input image has very bright
+objects (500 and 50 intensity in linear), here's the input with additional glare to show "hey I'm bright"
+(actual image used for tests has no glare).
+
+<img src="videos/input_with_glare.png" width="400">
+
 ### Smol Gaussian
 
 "Downsampled" Gaussian blur: downsample to a working resolution (which could be different
 per axis), apply a small separable Gaussian there, reconstruct to full resolution image.
 
-<img src="videos/blur_b_smol_gaussian.avif" width="300">
+<img src="videos/blur_b_smol_gaussian.avif" width="400">
 
 The algorithm is similar to Skia's GPU Gaussian blur as of 2026 Sep (`FilterResult::Builder::blur`
 and `FilterResult::rescale` in [SkImageFilterTypes.cpp](https://skia.googlesource.com/skia/+/15a9437eec87/src/core/SkImageFilterTypes.cpp)) - independent X/Y scaling, texture samples placed to use
@@ -113,7 +120,7 @@ For independent X/Y blur radii: when the smaller blur radius is reached, we stop
 further reductions along that axis. For the between-levels blend above, we might need
 to blend between three different blurred results.
 
-<img src="videos/blur_b_dual_kawase.avif" width="300">
+<img src="videos/blur_b_dual_kawase.avif" width="400">
 
 The result kinda works, but does not "feel great" to me. Smoothly animated blur radius does not "feel" smooth on HDR
 highlights, due to how blending happens between discrete blur levels.
@@ -131,7 +138,7 @@ was in revision `15a9437eec87` (2026 Sep). Basic algorithm is:
   or separable bilinear-paired filter samples is used depending on size.
 - Final result is bilinearly upscaled to original resolution.
 
-<img src="videos/blur_b_skia_gaussian.avif" width="300">
+<img src="videos/blur_b_skia_gaussian.avif" width="400">
 
 Skia blur feels just fine on regular LDR content, but on very bright HDR highlights, the aliasing and wobbling
 are quite apparent.
@@ -168,7 +175,7 @@ name, they may or might not be very _fast_ :)
 They also have some ringing artifacts, which are not that much noticeable in regular colors, but with very bright HDR highlights,
 blurred result can have halos or negative colors, which is not great. See:
 
-<img src="videos/blur_b_fast_gaussian.avif" width="300">
+<img src="videos/blur_b_fast_gaussian.avif" width="400">
 
 
 ### Ryg Blur
@@ -194,7 +201,7 @@ control is for how many times this box convolution should be done (1: box filter
 Amount of parallelism (parallel over rows or columns) is nowhere near enough to feed modern
 GPUs, and multiple passes over the full size image incur a lot of memory traffic.
 
-<img src="videos/blur_b_ryg.avif" width="300">
+<img src="videos/blur_b_ryg.avif" width="400">
 
 ### Regular Gaussian blur
 
@@ -204,7 +211,7 @@ This particular implementation cuts off the kernel at sigma=3 (matches behavior 
 which is fine for regular image content, but for very bright HDR highlights it makes
 the blur feel like it "stops" abruptly. Smol Gaussian feels better in this regard!
 
-<img src="videos/blur_b_gaussian.avif" width="300">
+<img src="videos/blur_b_gaussian.avif" width="400">
 
 
 ## Performance
